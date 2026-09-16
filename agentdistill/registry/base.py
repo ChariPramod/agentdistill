@@ -533,6 +533,45 @@ class Registry:
                 out.extend({"id": r["id"], "task_input": loads(r["task_input"])} for r in trace_rows)
         return out
 
+    def record_round(self, round_row: dict) -> None:
+        """Persist one on-policy round. Upserts, because a round is recorded on the way out whatever happened."""
+        ids = round_row.get("ids") or {}
+        params = {
+            "id": ids.get("round_id") or f"rd_{uuid.uuid4().hex[:16]}",
+            "tag": round_row.get("tag"),
+            "round_idx": round_row["round_idx"],
+            "start_adapter_id": round_row["start_adapter"],
+            "rollout_eval_run": ids.get("rollout_eval_run"),
+            "n_rollouts": round_row.get("n_rollouts"),
+            "fuzzy_share": round_row.get("fuzzy_share"),
+            "rft_dataset_id": ids.get("rft_dataset"),
+            "dpo_dataset_id": ids.get("dpo_dataset"),
+            "sft_run_id": ids.get("sft_run"),
+            "dpo_run_id": ids.get("dpo_run"),
+            "candidate_adapter": round_row.get("candidate_adapter"),
+            "eval_run_id": ids.get("eval_run"),
+            "compare": dumps(round_row.get("compare")),
+            "decision": round_row.get("decision"),
+            "reason": (round_row.get("reason") or "")[:1000],
+            "started_at": utcnow(),
+            "ended_at": utcnow(),
+        }
+        with self.engine.begin() as conn:
+            conn.execute(text("DELETE FROM onpolicy_rounds WHERE id = :id"), {"id": params["id"]})
+            conn.execute(
+                text(
+                    """INSERT INTO onpolicy_rounds (id, tag, round_idx, start_adapter_id, rollout_eval_run,
+                                                    n_rollouts, fuzzy_share, rft_dataset_id, dpo_dataset_id,
+                                                    sft_run_id, dpo_run_id, candidate_adapter, eval_run_id,
+                                                    compare, decision, reason, started_at, ended_at)
+                       VALUES (:id, :tag, :round_idx, :start_adapter_id, :rollout_eval_run, :n_rollouts,
+                               :fuzzy_share, :rft_dataset_id, :dpo_dataset_id, :sft_run_id, :dpo_run_id,
+                               :candidate_adapter, :eval_run_id, :compare, :decision, :reason, :started_at,
+                               :ended_at)"""
+                ),
+                params,
+            )
+
     # ----------------------------------------------------------------------------------------------------------
     # eval runs and results
     # ----------------------------------------------------------------------------------------------------------

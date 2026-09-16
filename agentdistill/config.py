@@ -216,6 +216,10 @@ class OnPolicyConfig(StrictModel):
     k_rollouts: int = Field(8, ge=1)
     rft_cap_per_task: int = Field(2, ge=1)
     dpo_beta: float = 0.1
+    #: Below this many usable pairs, DPO is noise.
+    min_pairs: int = Field(40, ge=1)
+    #: Above this share of fuzzily-replayed tool results, the rollouts' successes do not mean much.
+    max_fuzzy_share: float = Field(0.5, ge=0.0, le=1.0)
 
 
 class GraderConfig(StrictModel):

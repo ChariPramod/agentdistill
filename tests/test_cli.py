@@ -204,7 +204,6 @@ def test_base_check_on_a_missing_model(project):
 @pytest.mark.parametrize(
     ("args", "fragment"),
     [
-        (("train", "onpolicy", "a"), "milestone 4"),
         (("calibrate", "a"), "milestone 5"),
         (("serve",), "milestone 6"),
         (("retrain",), "milestone 7"),
@@ -218,6 +217,16 @@ def test_unbuilt_commands_say_so_clearly(project, args, fragment):
     assert result.exit_code == 2
     assert "not built yet" in out(result)
     assert fragment in out(result)
+
+
+def test_train_onpolicy_is_implemented(project):
+    """`train onpolicy` is built; --dry-run must plan rather than report it unbuilt."""
+    _init(project)
+    result = run("train", "onpolicy", "some-adapter", "--dry-run")
+    combined = out(result)
+    assert "not built yet" not in combined
+    # No traces ingested in this fixture, so it should say that rather than claim the command is missing.
+    assert "no training traces" in combined or "dry run" in combined
 
 
 def test_eval_run_is_implemented(project):

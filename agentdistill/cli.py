@@ -700,9 +700,157 @@ def adapter_list(config: str = typer.Option("project.yaml")) -> None:
 
 
 @train_app.command("onpolicy")
-def train_onpolicy(adapter: str, config: str = "project.yaml", rounds: int | None = None) -> None:
-    """Rejection sampling and DPO rounds using the eval harness for rollouts."""
-    _not_built("on-policy training", "milestone 4; it depends on the eval harness from milestone 3")
+def train_onpolicy(
+    adapter: str = typer.Argument(..., help="The adapter to improve."),
+    rounds: int = typer.Option(1, help="How many rounds to attempt. A discarded round stops the loop."),
+    tag: str | None = typer.Option(None, help="Groups this session's artifacts for the selectors."),
+    k: int | None = typer.Option(None, "--k", help="Rollouts per task."),
+    dry_run: bool = typer.Option(False, help="Print the stage plan and stop."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Rejection sampling and DPO rounds, using the eval harness for rollouts.
+
+    Each round rolls the current student out on training tasks, keeps what worked as new SFT data, pairs what did
+    not against what did, trains, evaluates, and compares the candidate against the *current adapter*. The
+    teacher comparison belongs in the report; here the only question is whether this round improved on the last.
+    """
+    from agentdistill.train.onpolicy import RoundCfg, plan, run_rounds
+
+    cfg = _load(config)
+    reg = _registry(cfg)
+
+    op = cfg.onpolicy
+    round_cfg = RoundCfg(
+        k_rollouts=k or op.k_rollouts,
+        rft_cap_per_task=op.rft_cap_per_task,
+        min_pairs=op.min_pairs,
+        max_fuzzy_share=op.max_fuzzy_share,
+    )
+
+    train_traces = [t for t in reg.list_traces() if t["id"] not in reg.eval_set_trace_ids()]
+    task_ids = [t["id"] for t in train_traces]
+    if not task_ids:
+        err.print("[red]no training traces[/red]; ingest and curate before running on-policy rounds.")
+        raise typer.Exit(code=1)
+
+    if dry_run:
+        for line in plan(adapter, rounds, task_ids, round_cfg):
+            console.print(f"  {line}")
+        console.print("\n[yellow]dry run: nothing executed[/yellow]")
+        return
+
+    current_eval = _select(
+        __import__("agentdistill.registry.select", fromlist=["latest_eval"]).latest_eval,
+        registry=reg, subject=adapter, eval_set=cfg.eval.eval_set,
+    )
+    stages = _onpolicy_stages(cfg, reg, tag, round_cfg)
+    teacher_by_task = {t.get("task_id") or t["id"]: t for t in train_traces}
+
+    results = run_rounds(adapter, rounds, task_ids, teacher_by_task, current_eval["id"], stages, round_cfg)
+    for r in results:
+        _print_round(r)
+    promoted = [r for r in results if r.promoted]
+    if promoted:
+        console.print(f"\n[green]kept[/green] {promoted[-1].candidate_adapter} after {len(promoted)} round(s)")
+    else:
+        console.print("\n[yellow]no round was kept[/yellow]; the starting adapter is still the best you have")
+
+
+def _print_round(r) -> None:
+    style = "green" if r.promoted else ("red" if r.decision == "error" else "yellow")
+    console.print(f"\n[bold]round {r.round_idx}[/bold] from {r.start_adapter}")
+    console.print(f"  rollouts    {r.n_rollouts}  (fuzzy share {r.fuzzy_share:.0%})")
+    console.print(f"  RFT samples {r.n_rft}")
+    console.print(f"  pairs       {r.n_pairs}  {r.pair_kinds or ''}")
+    if r.compare:
+        s = r.compare.get("success") or {}
+        lo, hi = s.get("ci95", (0, 0))
+        console.print(
+            f"  success     {s.get('delta', 0) * 100:+.1f} pp  [CI {lo * 100:+.1f}, {hi * 100:+.1f}]"
+        )
+        console.print(f"  tokens      {(r.compare.get('tokens') or {}).get('median_delta', 0):+.0f} median")
+    console.print(f"  [{style}]{r.decision}[/{style}]: {r.reason}")
+
+
+def _onpolicy_stages(cfg, reg, tag, round_cfg):
+    """Wire the loop's stages to the real trainers, harness, and registry."""
+    import uuid
+
+    from agentdistill.eval.rollouts import build_pairs as build_pairs_fn
+    from agentdistill.eval.rollouts import build_rft as build_rft_fn
+    from agentdistill.eval.rollouts import collect_rollouts
+    from agentdistill.eval.runner import RunSpec, run_eval
+    from agentdistill.eval.runner import compare as compare_runs
+    from agentdistill.train.onpolicy import Stages
+
+    grader = _resolve_grader(cfg)
+    state: dict[str, Any] = {}
+
+    def _collect(adapter, task_ids, k, policy):
+        client = _resolve_client(adapter, cfg, "hf")
+        traces = [reg.get_trace(t) for t in task_ids]
+        rollouts = collect_rollouts(
+            [t for t in traces if t], client, grader, k=k, policy=policy,
+            fuzzy_threshold=round_cfg.max_fuzzy_share, adapter_id=adapter,
+        )
+        state["rollouts"] = rollouts
+        return {"rollouts": rollouts.rollouts, "fuzzy_share": rollouts.replay.get("fuzzy_share", 0.0),
+                "eval_run_id": None}
+
+    def _build_rft(rollouts, cap):
+        from agentdistill.eval.rollouts import RolloutSet
+
+        rs = state.get("rollouts") or RolloutSet(rollouts=rollouts)
+        picked = build_rft_fn(rs, cap_per_task=cap)
+        state["rft"] = picked
+        return f"ds_rft_{uuid.uuid4().hex[:8]}", len(picked)
+
+    def _build_pairs(rollouts, teacher_by_task):
+        from agentdistill.eval.rollouts import RolloutSet
+        from agentdistill.train.dpo_data import balance_kinds, filter_pairs
+
+        rs = state.get("rollouts") or RolloutSet(rollouts=rollouts)
+        pairs = build_pairs_fn(rs, list(teacher_by_task.values()))
+        usable, _ = filter_pairs(pairs)
+        balanced, kinds = balance_kinds(usable, max_teacher_ratio=round_cfg.max_teacher_ratio)
+        state["pairs"] = balanced
+        return f"ds_pairs_{uuid.uuid4().hex[:8]}", len(balanced), kinds
+
+    def _train_sft_continue(adapter, dataset_id):
+        _not_built("continuing SFT from an existing adapter inside a round", "needs a GPU; see scripts/gpu_day.sh")
+        raise AssertionError("unreachable")
+
+    def _merge(adapter):
+        _not_built("adapter merge", "milestone 2 on a GPU; see scripts/gpu_day.sh")
+        raise AssertionError("unreachable")
+
+    def _train_dpo(merged, dataset_id):
+        _not_built("DPO inside a round", "needs a GPU; the trainer itself is tested on CPU")
+        raise AssertionError("unreachable")
+
+    def _run_eval(adapter):
+        es = reg.get_eval_set(cfg.eval.eval_set)
+        traces = {t: reg.get_trace(t) for t in es["trace_ids"]}
+        return run_eval(reg, es, {k: v for k, v in traces.items() if v},
+                        _resolve_client(adapter, cfg, "hf"), grader,
+                        RunSpec(subject=adapter, eval_set=cfg.eval.eval_set,
+                                n_per_task=cfg.eval.n_per_task, tag=tag))
+
+    def _compare(a, b):
+        return compare_runs(reg, a, b)
+
+    def _metrics(eval_run):
+        run = reg.get_eval_run(eval_run)
+        return (run or {}).get("metrics") or {}
+
+    def _record(row):
+        reg.record_round({**row, "tag": tag})
+
+    return Stages(
+        collect_rollouts=_collect, build_rft=_build_rft, build_pairs=_build_pairs,
+        train_sft_continue=_train_sft_continue, merge=_merge, train_dpo=_train_dpo,
+        run_eval=_run_eval, compare=_compare, metrics=_metrics, record=_record,
+    )
 
 
 def _resolve_grader(cfg: Any):
