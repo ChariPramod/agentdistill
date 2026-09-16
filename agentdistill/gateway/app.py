@@ -1,0 +1,231 @@
+"""The gateway.
+
+An OpenAI- and Anthropic-compatible endpoint that the agent points `base_url` at. The agent keeps its SDK and its
+model name; routing, escalation, and the cascade are invisible to it.
+
+Two rules shape the error handling. The gateway sits in front of a working agent, so it never becomes the reason
+that agent stops working: when the student is unreachable it falls back to the teacher rather than failing the
+request. And it never silently changes behaviour: every response carries an `agentdistill` block (or headers, in
+the Anthropic dialect) saying which arm answered and whether the gate escalated.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import time
+import uuid
+from typing import Any
+
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
+
+from agentdistill.gateway.backends import BackendError
+from agentdistill.gateway.dialect import (
+    anthropic_stream_events,
+    from_anthropic_request,
+    from_openai_request,
+    openai_stream_events,
+    to_anthropic_response,
+    to_openai_response,
+)
+from agentdistill.gateway.resolve import UnknownModel, resolve
+from agentdistill.gateway.state import GatewayState
+
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="agentdistill gateway")
+gw: GatewayState = GatewayState.uninitialized()
+
+
+def set_state(state: GatewayState) -> None:
+    """Install the gateway's state. Called at boot, and by tests."""
+    global gw
+    gw = state
+
+
+def _canary_for(request_id: str) -> bool:
+    """Deterministic per-request split, so a retry of the same request lands on the same adapter."""
+    if not gw.canary_adapter or gw.canary_share <= 0:
+        return False
+    bucket = int(hashlib.sha256(request_id.encode()).hexdigest()[:8], 16) % 100
+    return bucket < gw.canary_share * 100
+
+
+async def handle(req: dict) -> tuple[dict, dict, dict]:
+    """Route one request. Returns (choice, usage, meta)."""
+    started = time.time()
+    request_id = uuid.uuid4().hex
+    try:
+        route = resolve(req["model"], gw.prod_adapter, gw.prod_threshold, gw.teacher_names)
+    except UnknownModel as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    cluster = gw.clusters.assign(req["messages"]) if gw.clusters else None
+    meta: dict[str, Any] = {
+        "id": request_id, "cluster_id": cluster, "route": route.mode, "adapter": route.adapter,
+    }
+
+    if route.mode == "router":
+        arm = gw.router.choose(cluster) if (gw.router and cluster is not None) else "student"
+        meta["router_arm"] = arm
+        if arm == "teacher":
+            route.mode = "teacher"
+        else:
+            route.mode = "cascade"
+            if _canary_for(request_id):
+                route.adapter = gw.canary_adapter
+                meta["canary"] = True
+
+    cluster_prior = gw.router.state_mean(cluster, "student") if (gw.router and cluster is not None) else 0.5
+
+    try:
+        choice, usage, arm_meta = await _dispatch(route, req, cluster_prior)
+    except BackendError as e:
+        if route.mode in ("student", "cascade") and gw.teacher is not None:
+            # The gateway must not be the reason a working agent breaks.
+            logger.warning("student backend failed (%s); falling back to the teacher", e)
+            data = await gw.teacher.chat(req["messages"], req["tools"], temperature=req["temperature"])
+            choice, usage = data["choices"][0], data.get("usage", {})
+            arm_meta = {"arm": "teacher", "escalated": True, "fallback": True, "fallback_reason": str(e)}
+        else:
+            raise HTTPException(status_code=502, detail=str(e)) from e
+
+    meta.update(arm_meta)
+    meta["latency_ms"] = int((time.time() - started) * 1000)
+    meta.setdefault("adapter", route.adapter)
+    if gw.log is not None:
+        await gw.log.write(meta, req, choice, usage)
+    return choice, usage, meta
+
+
+async def _dispatch(route: Any, req: dict, cluster_prior: float) -> tuple[dict, dict, dict]:
+    if route.mode == "teacher":
+        if gw.teacher is None:
+            raise HTTPException(status_code=503, detail="no teacher is configured")
+        data = await gw.teacher.chat(req["messages"], req["tools"], temperature=req["temperature"])
+        usage = data.get("usage", {})
+        return data["choices"][0], usage, {
+            "arm": "teacher", "escalated": False, "teacher_tokens": usage.get("completion_tokens", 0),
+        }
+
+    if route.mode == "student":
+        data = await gw.student.chat(
+            req["messages"], req["tools"],
+            model=f"student:{route.adapter}" if route.adapter else "student",
+            temperature=req["temperature"],
+        )
+        usage = data.get("usage", {})
+        return data["choices"][0], usage, {
+            "arm": "student", "escalated": False, "student_tokens": usage.get("completion_tokens", 0),
+        }
+
+    return await gw.cascade_turn(
+        req["messages"], req["tools"], route.adapter, route.threshold, cluster_prior, req["temperature"]
+    )
+
+
+# --------------------------------------------------------------------------------------------------------------
+# endpoints
+# --------------------------------------------------------------------------------------------------------------
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request, response: Response):
+    body = await request.json()
+    req = from_openai_request(body)
+    choice, usage, meta = await handle(req)
+
+    if req["stream"]:
+        return _stream(openai_stream_events(choice, body["model"], usage), meta)
+
+    out = to_openai_response(choice, body["model"], usage)
+    # Non-standard, and namespaced so a strict client ignores it: which arm answered, for the feedback call.
+    out["agentdistill"] = {
+        "request_id": meta["id"], "arm": meta.get("arm"), "escalated": meta.get("escalated"),
+        "adapter": meta.get("adapter"), "confidence": meta.get("confidence"),
+    }
+    _set_headers(response, meta)
+    return out
+
+
+@app.post("/v1/messages")
+async def messages(request: Request, response: Response):
+    body = await request.json()
+    req = from_anthropic_request(body)
+    choice, usage, meta = await handle(req)
+
+    if req["stream"]:
+        return _stream(anthropic_stream_events(choice, body["model"], usage), meta)
+
+    # The Anthropic response schema is closed, so the routing detail goes in headers rather than the body.
+    _set_headers(response, meta)
+    return to_anthropic_response(choice, body["model"], usage)
+
+
+def _set_headers(response: Response, meta: dict) -> None:
+    response.headers["x-agentdistill-request-id"] = str(meta.get("id", ""))
+    response.headers["x-agentdistill-arm"] = str(meta.get("arm", ""))
+    response.headers["x-agentdistill-escalated"] = "true" if meta.get("escalated") else "false"
+    if meta.get("adapter"):
+        response.headers["x-agentdistill-adapter"] = str(meta["adapter"])
+
+
+def _stream(events: list[str], meta: dict) -> StreamingResponse:
+    """Emit a decided turn as a stream.
+
+    The cascade cannot stream honestly: the gate needs the whole turn before it can decide whether to keep it. So
+    the turn is decided first and then replayed as events, and the response says so in a header rather than
+    letting a client believe it watched the model think.
+    """
+    async def generate():
+        for event in events:
+            yield event
+
+    headers = {
+        "x-agentdistill-request-id": str(meta.get("id", "")),
+        "x-agentdistill-arm": str(meta.get("arm", "")),
+        "x-agentdistill-buffered": "true",
+        "cache-control": "no-cache",
+    }
+    return StreamingResponse(generate(), media_type="text/event-stream", headers=headers)
+
+
+@app.post("/v1/feedback")
+async def feedback(body: dict):
+    """Report whether a request's task actually worked.
+
+    This is what turns the request log into training data, and what lets the router learn. A gateway with no
+    feedback still routes, but it routes on its warm start forever.
+    """
+    request_id = body.get("request_id")
+    if not request_id:
+        raise HTTPException(status_code=400, detail="request_id is required")
+    updated = await gw.log.set_outcome(request_id, bool(body.get("success")))
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"unknown request_id {request_id}")
+
+    record = await gw.log.get(request_id)
+    if gw.router and record and record.get("cluster_id") is not None and record.get("arm") in ("student", "teacher"):
+        gw.router.update(record["cluster_id"], record["arm"], bool(body.get("success")))
+        if getattr(gw, "router_store", None):
+            gw.router_store.flush(gw.router)
+    return {"ok": True, "request_id": request_id}
+
+
+@app.get("/healthz")
+async def healthz():
+    return gw.health()
+
+
+@app.get("/v1/models")
+async def models():
+    """What an OpenAI client sees. The eval names are listed so a harness can point at them."""
+    available = ["teacher", "student"]
+    if gw.prod_adapter:
+        available.append(f"student:{gw.prod_adapter}")
+        if gw.prod_threshold is not None:
+            available.append(f"cascade:{gw.prod_adapter}:auto")
+    available.extend(sorted(gw.teacher_names))
+    return {"object": "list", "data": [{"id": m, "object": "model", "owned_by": "agentdistill"}
+                                       for m in available]}

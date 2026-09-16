@@ -204,7 +204,6 @@ def test_base_check_on_a_missing_model(project):
 @pytest.mark.parametrize(
     ("args", "fragment"),
     [
-        (("serve",), "milestone 6"),
         (("retrain",), "milestone 7"),
         (("report",), "milestone 8"),
         (("ingest", "gateway"), "milestone 6"),
@@ -216,6 +215,15 @@ def test_unbuilt_commands_say_so_clearly(project, args, fragment):
     assert result.exit_code == 2
     assert "not built yet" in out(result)
     assert fragment in out(result)
+
+
+def test_serve_is_implemented(project):
+    """`serve --dry-run` must load and report, not claim to be unbuilt."""
+    _init(project)
+    result = run("serve", "--dry-run")
+    combined = out(result)
+    assert "not built yet" not in combined
+    assert "dry run" in combined or "gateway" in combined
 
 
 def test_calibrate_is_implemented(project):

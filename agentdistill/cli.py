@@ -1352,9 +1352,52 @@ def adapter_lineage(adapter: str) -> None:
 
 
 @app.command()
-def serve(config: str = "project.yaml", host: str = "0.0.0.0", port: int = 8710) -> None:
-    """Start the gateway."""
-    _not_built("the gateway", "milestone 6; do not build it before the eval harness exists")
+def serve(
+    config: str = typer.Option("project.yaml"),
+    host: str | None = typer.Option(None, help="Defaults to serve.host."),
+    port: int | None = typer.Option(None, help="Defaults to serve.port."),
+    dry_run: bool = typer.Option(False, help="Load and report what would be served, then stop."),
+) -> None:
+    """Start the gateway.
+
+    The agent points `base_url` here and keeps its model name. Routing, escalation, and the cascade are invisible
+    to it, and every response says which arm answered.
+    """
+    from agentdistill.gateway import app as gateway_app
+    from agentdistill.gateway.state import load_state
+
+    cfg = _load(config)
+    reg = _registry(cfg)
+    state = load_state(cfg, reg)
+    gateway_app.set_state(state)
+
+    table = Table(box=None, title="gateway")
+    table.add_column("")
+    table.add_column("", overflow="fold")
+    table.add_row("student", cfg.serve.vllm_url)
+    table.add_row("teacher", cfg.teacher.model if cfg.teacher else "[red]none configured[/red]")
+    table.add_row("prod adapter", state.prod_adapter or "[yellow]none; the agent's model passes through[/yellow]")
+    table.add_row("canary", f"{state.canary_adapter} at {state.canary_share:.0%}" if state.canary_adapter else "-")
+    table.add_row("gate", f"threshold {state.prod_threshold}" if state.cascade_available
+                  else "[yellow]no usable calibration; escalating every turn[/yellow]")
+    console.print(table)
+    for note in state.notes:
+        console.print(f"[yellow]note:[/yellow] {note}")
+
+    if dry_run:
+        console.print("\n[yellow]dry run: not serving[/yellow]")
+        return
+
+    try:
+        import uvicorn
+    except ImportError as e:
+        err.print("[red]uvicorn is required to serve[/red]; it ships with the core install.")
+        raise typer.Exit(code=1) from e
+
+    bind_host = host or cfg.serve.host
+    bind_port = port or cfg.serve.port
+    console.print(f"\nlistening on http://{bind_host}:{bind_port}  (POST /v1/chat/completions, /v1/messages)")
+    uvicorn.run(gateway_app.app, host=bind_host, port=bind_port, log_level="info")
 
 
 @app.command()

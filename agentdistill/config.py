@@ -292,6 +292,10 @@ class ServeConfig(StrictModel):
     guided_json: bool = True
     tool_call_parser: str | None = None
     max_model_len: int = 16384
+    #: Share of student-routed requests served by the canary adapter, for a live A/B.
+    canary_share: float = Field(0.0, ge=0.0, le=1.0)
+    host: str = "0.0.0.0"
+    port: int = 8710
 
 
 class ProjectConfig(StrictModel):

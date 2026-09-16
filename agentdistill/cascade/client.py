@@ -21,6 +21,35 @@ from agentdistill.cascade.arg_mask import arg_token_mask
 from agentdistill.cascade.features import as_vector, turn_features
 
 
+def score_turn(
+    choice: dict,
+    extra_samples: list[dict],
+    calibrator: Any,
+    feature_names: list[str],
+    cluster_prior: float,
+    turn_idx: int,
+    prefix_tokens: int,
+) -> float:
+    """Probability that this turn is good.
+
+    Shared by the offline cascade client and the gateway, so the gate that is measured is the gate that serves.
+    """
+    tokens = [t["token"] for t in (choice.get("logprobs") or {}).get("content") or []]
+    text = choice.get("text") or "".join(tokens)
+    mask = arg_token_mask(tokens, text, choice["message"].get("tool_calls") or [])
+    features = turn_features(choice, mask, extra_samples, cluster_prior, turn_idx, prefix_tokens)
+    vector = as_vector(features, feature_names)[None, :]
+    return float(calibrator.predict_proba(vector)[0, 1])
+
+
+def prefix_token_estimate(messages: list[dict]) -> int:
+    return sum(len(json.dumps(m)) for m in messages) // 4
+
+
+def turn_index(messages: list[dict]) -> int:
+    return sum(1 for m in messages if m["role"] == "assistant")
+
+
 class SamplingBackend(Protocol):
     def chat(self, messages: list[dict], tools: list[dict], n: int, logprobs: bool) -> list[dict]:
         """Return n OpenAI-style choice dicts: {message, logprobs: {content: [...]}, text}."""
@@ -61,16 +90,13 @@ class CascadeTurnClient:
         self.log.clear()
 
     def score(self, choice: dict, extra: list[dict], turn_idx: int, prefix_tokens: int) -> float:
-        tokens = [t["token"] for t in (choice.get("logprobs") or {}).get("content") or []]
-        text = choice.get("text") or "".join(tokens)
-        mask = arg_token_mask(tokens, text, choice["message"].get("tool_calls") or [])
-        features = turn_features(choice, mask, extra, self.cluster_prior, turn_idx, prefix_tokens)
-        vector = as_vector(features, self.feature_names)[None, :]
-        return float(self.calibrator.predict_proba(vector)[0, 1])
+        return score_turn(
+            choice, extra, self.calibrator, self.feature_names, self.cluster_prior, turn_idx, prefix_tokens
+        )
 
     def next_turn(self, messages: list[dict], tools: list[dict]) -> dict:
-        turn_idx = sum(1 for m in messages if m["role"] == "assistant")
-        prefix_tokens = sum(len(json.dumps(m)) for m in messages) // 4
+        turn_idx = turn_index(messages)
+        prefix_tokens = prefix_token_estimate(messages)
 
         if self.escalate_everything:
             teacher_choice = self.teacher.chat(messages, tools, n=1, logprobs=False)[0]

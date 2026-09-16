@@ -43,7 +43,8 @@ postgres = ["psycopg[binary]>=3.1", "pgvector>=0.3"]
 agentreplay = ["agentreplay>=0.1"]
 local-embeddings = ["sentence-transformers>=3"]
 tokenizers = ["transformers>=4.44"]
-dev = ["pytest>=8", "pytest-asyncio", "ruff", "mypy", "hypothesis", "respx", "types-PyYAML"]
+dev = ["pytest>=8", "pytest-asyncio", "ruff", "mypy", "hypothesis", "respx", "types-PyYAML",
+       "openai>=1.40", "anthropic>=0.34"]   # the gateway contract tests use the real SDKs
 
 [project.scripts]
 agentdistill = "agentdistill.cli:app"
