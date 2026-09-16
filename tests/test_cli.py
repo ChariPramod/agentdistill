@@ -204,7 +204,6 @@ def test_base_check_on_a_missing_model(project):
 @pytest.mark.parametrize(
     ("args", "fragment"),
     [
-        (("eval", "run", "student"), "milestone 3"),
         (("train", "onpolicy", "a"), "milestone 4"),
         (("calibrate", "a"), "milestone 5"),
         (("serve",), "milestone 6"),
@@ -219,6 +218,14 @@ def test_unbuilt_commands_say_so_clearly(project, args, fragment):
     assert result.exit_code == 2
     assert "not built yet" in out(result)
     assert fragment in out(result)
+
+
+def test_eval_run_is_implemented(project):
+    """`eval run` is built; it must fail on a missing eval set, not on being unimplemented."""
+    _init(project)
+    result = run("eval", "run", "base", "--eval-set", "nope")
+    assert "not built yet" not in out(result)
+    assert result.exit_code == 1
 
 
 def test_train_sft_is_implemented(project):

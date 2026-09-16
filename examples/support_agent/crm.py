@@ -11,6 +11,7 @@ of the trajectory and are where a teacher's behaviour becomes worth imitating.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import sqlite3
@@ -239,7 +240,12 @@ class CRM:
         tracking: str | None = None,
     ) -> None:
         if carrier and not tracking:
-            tracking = f"1Z{abs(hash(order_id)) % 10**10:010d}"
+            # A stable digest, never the built-in hash(): PYTHONHASHSEED is randomized per process, so hash()
+            # would give a rebuilt database a different tracking number than the recording had. The replay
+            # grader rebuilds state in a *different process* from the one that recorded it, and an unstable id
+            # there silently fails every predicate that checks a tracking number.
+            digest = hashlib.sha256(order_id.encode()).hexdigest()
+            tracking = f"1Z{int(digest[:12], 16) % 10**10:010d}"
         self.conn.execute(
             "INSERT INTO orders (id, customer_id, status, total, item, placed_on, carrier, tracking) "
             "VALUES (?,?,?,?,?,?,?,?)",
@@ -395,6 +401,4 @@ class CRM:
         }
 
     def state_hash(self) -> str:
-        import hashlib
-
         return hashlib.sha256(json.dumps(self.state(), sort_keys=True).encode()).hexdigest()[:16]

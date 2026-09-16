@@ -7,10 +7,21 @@ from tests.conftest import make_trace
 
 
 def test_migrate_is_idempotent(registry):
-    assert registry.schema_version() == 1
+    from agentdistill.registry.base import SCHEMA_VERSION
+
+    assert registry.schema_version() == SCHEMA_VERSION
     registry.migrate()
     registry.migrate()
-    assert registry.schema_version() == 1
+    assert registry.schema_version() == SCHEMA_VERSION
+
+
+def test_every_migration_file_is_applied():
+    """A migration added to the list but not to the dialect directory would fail only at runtime."""
+    from agentdistill.registry.base import MIGRATION_FILES, MIGRATIONS
+
+    for dialect in ("sqlite", "postgres"):
+        for filename in MIGRATION_FILES:
+            assert (MIGRATIONS / dialect / filename).exists(), f"missing {dialect}/{filename}"
 
 
 def test_insert_and_read_back(registry):

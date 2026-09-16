@@ -609,16 +609,293 @@ def train_onpolicy(adapter: str, config: str = "project.yaml", rounds: int | Non
     _not_built("on-policy training", "milestone 4; it depends on the eval harness from milestone 3")
 
 
+def _resolve_grader(cfg: Any):
+    """Turn `eval.grader` into a callable `(trace, outcome) -> (success, detail)`."""
+    from agentdistill.eval.runner import label_grader
+
+    kind = cfg.eval.grader.type
+    if kind in ("predicate", "replay_predicate"):
+        source = cfg.eval.grader.predicate_source or "examples.support_agent.replay_grader:grade_outcome"
+        module_name, _, attr = source.partition(":")
+        import importlib
+
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError as e:
+            err.print(
+                f"[red]could not import the predicate source {source!r}:[/red] {e}\n"
+                f"Set eval.grader.predicate_source to a `module:callable` that grades a (trace, outcome) pair."
+            )
+            raise typer.Exit(code=1) from e
+        return getattr(module, attr)
+    if kind == "llm_judge":
+        _not_built("the LLM judge grader", "milestone 3 stretch; predicates are the supported grader today")
+    return label_grader
+
+
+def _resolve_client(subject: str, cfg: Any, backend: str, tok: Any = None):
+    """Turn a subject string into a TurnClient.
+
+    Subjects: an adapter name, `base`, `teacher`, `recorded`, or `http:<model>@<url>`.
+    """
+    from agentdistill.eval.clients import HfTurnClient, HttpTurnClient
+
+    parser = cfg.train.tool_parser if cfg.train else None
+    parser_name = parser.name if parser else None
+    family = parser.family if parser else None
+
+    if subject.startswith("http:"):
+        rest = subject[len("http:") :]
+        remote_model, _, url = rest.partition("@")
+        if not url:
+            err.print("[red]http subjects look like http:<model>@<base-url>[/red]")
+            raise typer.Exit(code=1)
+        return HttpTurnClient(base_url=url, model=remote_model)
+
+    if subject == "recorded":
+        # The control: replays the recorded turns. Used to prove the harness reproduces a trace.
+        return "recorded"
+
+    if cfg.train is None:
+        err.print("[red]project.yaml has no `train` section, so a model subject cannot be resolved[/red]")
+        raise typer.Exit(code=1)
+
+    base_model = cfg.train.base_model
+    adapter_path = None
+    if subject not in ("base", "teacher"):
+        reg = _registry(cfg)
+        match = next((a for a in reg.list_adapters() if a["name"] == subject or a["id"] == subject), None)
+        if match is None:
+            err.print(f"[red]no adapter named {subject!r}[/red]; try `agentdistill adapter list`, "
+                      f"or use `base`, `recorded`, or `http:<model>@<url>`.")
+            raise typer.Exit(code=1)
+        adapter_path, base_model = match["path"], match["base_model"]
+
+    if backend == "vllm":
+        from agentdistill.eval.clients import VllmOfflineTurnClient
+
+        return VllmOfflineTurnClient(base_model, tok, parser_name, family, lora_path=adapter_path)
+
+    from agentdistill.data.dataset import load_tokenizer
+
+    tok = tok or load_tokenizer(base_model)
+    try:
+        from transformers import AutoModelForCausalLM
+    except ImportError as e:
+        err.print("[red]the hf backend needs transformers; install `agentdistill[train]`[/red]")
+        raise typer.Exit(code=1) from e
+    loaded: Any = AutoModelForCausalLM.from_pretrained(base_model)
+    if adapter_path:
+        from peft import PeftModel
+
+        loaded = PeftModel.from_pretrained(loaded, adapter_path)
+    return HfTurnClient(loaded, tok, parser_name, family)
+
+
 @eval_app.command("run")
-def eval_run(subject: str, eval_set: str | None = None, config: str = "project.yaml") -> None:
-    """Evaluate an adapter, 'teacher', or 'cascade:<adapter>:<tau>' on the eval set."""
-    _not_built("the eval harness", "milestone 3")
+def eval_run(
+    subject: str = typer.Argument(..., help="Adapter name, 'base', 'recorded', or 'http:<model>@<url>'."),
+    eval_set: str | None = typer.Option(None, help="Eval set name; defaults to eval.eval_set."),
+    n: int | None = typer.Option(None, "--n", help="Repeats per task."),
+    policy: str = typer.Option("strict", help="strict or fuzzy replay."),
+    backend: str = typer.Option("hf", help="hf, vllm, or http."),
+    max_turns: int = typer.Option(12),
+    fuzzy_threshold: float = typer.Option(0.92),
+    store_messages: bool = typer.Option(True, help="Keep full trajectories for hand review."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Evaluate a subject on an eval set, replaying tool results from the recorded traces."""
+    from agentdistill.eval.report import render_run
+    from agentdistill.eval.runner import RunSpec, run_eval
+
+    cfg = _load(config)
+    reg = _registry(cfg)
+    name = eval_set or cfg.eval.eval_set
+    if not name:
+        err.print("[red]no eval set[/red]; pass --eval-set or set eval.eval_set in project.yaml.")
+        raise typer.Exit(code=1)
+    es = reg.get_eval_set(name)
+    if es is None:
+        err.print(f"[red]no eval set named {name!r}[/red]; see `agentdistill evalset list`.")
+        raise typer.Exit(code=1)
+
+    traces_by_task = {}
+    for trace_id in es["trace_ids"]:
+        trace = reg.get_trace(trace_id)
+        if trace is not None:
+            traces_by_task[trace_id] = trace
+    if not traces_by_task:
+        err.print(f"[red]eval set {name!r} references no traces that are still in the registry[/red]")
+        raise typer.Exit(code=1)
+
+    grader = _resolve_grader(cfg)
+    client = _resolve_client(subject, cfg, backend)
+
+    spec = RunSpec(
+        subject=subject,
+        eval_set=name,
+        n_per_task=n or cfg.eval.n_per_task,
+        policy=policy,
+        max_turns=max_turns,
+        fuzzy_threshold=fuzzy_threshold,
+    )
+    console.print(f"[bold]eval[/bold] {subject} on {name}: {len(traces_by_task)} tasks x {spec.n_per_task}")
+
+    from rich.progress import Progress
+
+    with Progress(transient=True) as bar:
+        task_bar = bar.add_task("running", total=len(traces_by_task) * spec.n_per_task)
+
+        def tick(done: int, total: int) -> None:
+            bar.update(task_bar, completed=done)
+
+        if client == "recorded":
+            run_id = _run_recorded(reg, es, traces_by_task, grader, spec, store_messages, tick)
+        else:
+            run_id = run_eval(reg, es, traces_by_task, client, grader, spec,
+                              store_messages=store_messages, progress=tick)
+
+    run = reg.get_eval_run(run_id)
+    console.print()
+    console.print(render_run(run))
+    console.print()
+    console.print(f"[dim]compare with: agentdistill eval compare {run_id[:10]} <other-run>[/dim]")
+
+
+def _run_recorded(reg, es, traces_by_task, grader, spec, store_messages, tick):
+    """`recorded` needs a fresh client per task, since each replays that task's own turns."""
+    import uuid
+
+    from agentdistill.eval.clients import RecordedTurnClient
+    from agentdistill.eval.harness import run_task
+    from agentdistill.eval.replay import ReplayToolProvider
+    from agentdistill.eval.runner import aggregate
+
+    run_id = f"ev_{uuid.uuid4().hex[:16]}"
+    reg.start_eval_run(run_id, es["id"], spec.subject, spec.n_per_task)
+    done = 0
+    for trace_id in es["trace_ids"]:
+        trace = traces_by_task.get(trace_id)
+        if trace is None:
+            continue
+        for k in range(spec.n_per_task):
+            provider = ReplayToolProvider(trace, policy=spec.policy, fuzzy_threshold=spec.fuzzy_threshold)
+            outcome = run_task(trace, RecordedTurnClient(trace), provider, repeat_idx=k,
+                               max_turns=spec.max_turns)
+            success, detail = grader(trace, outcome)
+            outcome.success = success
+            outcome.grader_detail = str(detail.get("detail", ""))[:500]
+            reg.write_eval_result(run_id, outcome, cluster=trace.get("cluster"),
+                                  store_messages=store_messages)
+            done += 1
+            tick(done, 0)
+    metrics, per_cluster = aggregate(reg.eval_results(run_id), traces_by_task)
+    reg.finish_eval_run(run_id, metrics, per_cluster)
+    return run_id
 
 
 @eval_app.command("compare")
-def eval_compare(a: str, b: str) -> None:
+def eval_compare(
+    run_a: str = typer.Argument(..., help="Run id, id prefix, or latest:<subject>."),
+    run_b: str = typer.Argument(..., help="The baseline. Positive deltas favour run_a."),
+    alpha: float = typer.Option(0.05),
+    out: str | None = typer.Option(None, help="Also write the report as Markdown."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
     """Paired statistical comparison of two eval runs."""
-    _not_built("eval compare", "milestone 3")
+    from agentdistill.eval.report import render_comparison, render_run_markdown
+    from agentdistill.eval.runner import compare
+    from agentdistill.eval.stats import TooFewTasks
+
+    cfg = _load(config)
+    reg = _registry(cfg)
+    a, b = reg.find_eval_run(run_a), reg.find_eval_run(run_b)
+    if a is None or b is None:
+        err.print(f"[red]could not resolve {'run_a' if a is None else 'run_b'}[/red]; "
+                  f"try `agentdistill eval list`.")
+        raise typer.Exit(code=1)
+    try:
+        result = compare(reg, a["id"], b["id"], alpha=alpha)
+    except (TooFewTasks, ValueError) as e:
+        err.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+
+    console.print(render_comparison(result))
+    if out:
+        path = Path(out)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(render_run_markdown(a, result))
+        console.print(f"\n[green]wrote[/green] {path}")
+
+
+@eval_app.command("list")
+def eval_list(config: str = typer.Option("project.yaml")) -> None:
+    """List eval runs."""
+    cfg = _load(config)
+    runs = _registry(cfg).list_eval_runs()
+    if not runs:
+        console.print("no eval runs yet")
+        return
+    table = Table(box=None)
+    for col in ("run", "subject", "eval set", "success", "divergence", "started"):
+        table.add_column(col)
+    for r in runs:
+        m = r["metrics"] or {}
+        table.add_row(
+            r["id"][:12], r["subject"], r["eval_set_id"],
+            f"{m.get('success', float('nan')) * 100:.1f}%" if m.get("success") is not None else "-",
+            f"{m.get('divergence_rate', 0) * 100:.1f}%",
+            (r["started_at"] or "")[:19],
+        )
+    console.print(table)
+
+
+@eval_app.command("show")
+def eval_show(
+    run: str = typer.Argument(..., help="Run id or prefix."),
+    failures_only: bool = typer.Option(False, help="Only tasks that failed at least once."),
+    divergences: bool = typer.Option(False, help="Show the divergence summary instead of per-task rows."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Per-task outcomes, for hand review. Reading failures is the only way to learn why a number moved."""
+    from agentdistill.eval.report import per_task_table, render_run, summarize_divergences
+
+    cfg = _load(config)
+    reg = _registry(cfg)
+    found = reg.find_eval_run(run)
+    if found is None:
+        err.print(f"[red]no eval run matching {run!r}[/red]")
+        raise typer.Exit(code=1)
+    rows = reg.eval_results(found["id"])
+    console.print(render_run(found))
+    console.print()
+
+    if divergences:
+        summary = summarize_divergences(rows)
+        if not summary:
+            console.print("no divergences")
+            return
+        table = Table(box=None, title="divergences by tool")
+        for col in ("tool", "n", "max nearest score", "example args"):
+            table.add_column(col, overflow="fold")
+        for entry in summary:
+            table.add_row(entry["tool"], str(entry["n"]), f"{entry['max_score']:.2f}",
+                          json.dumps(entry["example"].get("args"))[:80])
+        console.print(table)
+        console.print(
+            "\n[dim]A high nearest score is an argument-phrasing gap: add a per-tool rule in canonical.py. "
+            "A low one means the student genuinely went elsewhere.[/dim]"
+        )
+        return
+
+    table = Table(box=None)
+    for col in ("task", "success", "diverged", "first failure detail"):
+        table.add_column(col, overflow="fold")
+    for task, success, diverged, detail in per_task_table(rows):
+        if failures_only and success.split("/")[0] == success.split("/")[1]:
+            continue
+        table.add_row(task, success, diverged, detail)
+    console.print(table)
 
 
 @app.command()

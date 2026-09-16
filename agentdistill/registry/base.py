@@ -8,6 +8,7 @@ here and to the two migration files; nothing above this layer knows which backen
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,10 @@ from typing import Any
 from sqlalchemy import Engine, create_engine, event, text
 
 MIGRATIONS = Path(__file__).resolve().parent / "migrations"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+#: Migrations are applied in order; each is idempotent.
+MIGRATION_FILES = ("001_init.sql", "002_eval_results.sql")
 
 
 def utcnow() -> str:
@@ -137,12 +141,13 @@ class Registry:
 
     def migrate(self) -> None:
         """Apply migrations that have not been applied. Idempotent: every statement is IF NOT EXISTS."""
-        sql_path = MIGRATIONS / self.dialect / "001_init.sql"
         with self.engine.begin() as conn:
-            for stmt in split_statements(sql_path.read_text()):
-                if stmt.upper().startswith("PRAGMA") and self.dialect != "sqlite":
-                    continue
-                conn.execute(text(stmt))
+            for filename in MIGRATION_FILES:
+                sql_path = MIGRATIONS / self.dialect / filename
+                for stmt in split_statements(sql_path.read_text()):
+                    if stmt.upper().startswith("PRAGMA") and self.dialect != "sqlite":
+                        continue
+                    conn.execute(text(stmt))
             if not self._has_version(conn):
                 conn.execute(
                     text("INSERT INTO schema_version (version, applied_at) VALUES (:v, :t)"),
@@ -518,6 +523,133 @@ class Registry:
                 )
                 out.extend({"id": r["id"], "task_input": loads(r["task_input"])} for r in trace_rows)
         return out
+
+    # ----------------------------------------------------------------------------------------------------------
+    # eval runs and results
+    # ----------------------------------------------------------------------------------------------------------
+
+    def start_eval_run(self, run_id: str, eval_set_id: str, subject: str, n_per_task: int) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """INSERT INTO eval_runs (id, eval_set_id, subject, n_per_task, metrics, started_at)
+                       VALUES (:id, :es, :subject, :n, :metrics, :started)"""
+                ),
+                {"id": run_id, "es": eval_set_id, "subject": subject, "n": n_per_task,
+                 "metrics": dumps({}), "started": utcnow()},
+            )
+
+    def write_eval_result(self, run_id: str, outcome: Any, cluster: int | None = None,
+                          store_messages: bool = True) -> None:
+        row = outcome.to_row()
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """INSERT INTO eval_results (id, eval_run_id, task_id, repeat_idx, success, schema_valid,
+                                                 diverged, divergence, n_turns, n_tool_calls,
+                                                 completion_tokens_est, latency_ms, stop_reason, grader_detail,
+                                                 replay_stats, final_text, messages, cluster)
+                       VALUES (:id, :run, :task, :repeat, :success, :schema_valid, :diverged, :divergence,
+                               :n_turns, :n_tool_calls, :tokens, :latency, :stop, :detail, :replay, :final,
+                               :messages, :cluster)"""
+                ),
+                {
+                    "id": f"er_{uuid.uuid4().hex[:16]}",
+                    "run": run_id,
+                    "task": row["task_id"],
+                    "repeat": row["repeat_idx"],
+                    "success": row["success"],
+                    "schema_valid": row["schema_valid"],
+                    "diverged": row["diverged"],
+                    "divergence": dumps(row["divergence"]),
+                    "n_turns": row["n_turns"],
+                    "n_tool_calls": row["n_tool_calls"],
+                    "tokens": row["completion_tokens_est"],
+                    "latency": row["latency_ms"],
+                    "stop": row["stop_reason"],
+                    "detail": row["grader_detail"],
+                    "replay": dumps(row["replay_stats"]),
+                    "final": row["final_text"],
+                    # Trajectories are large. Kept by default because hand-reading failures is the only way to
+                    # find out why a number moved, but `eval run --no-store-messages` turns it off.
+                    "messages": dumps(outcome.messages) if store_messages else None,
+                    "cluster": cluster,
+                },
+            )
+
+    def eval_results(self, run_id: str) -> list[dict]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT * FROM eval_results WHERE eval_run_id = :r ORDER BY task_id, repeat_idx"),
+                {"r": run_id},
+            ).mappings().fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["success"] = as_bool(d["success"])
+            d["schema_valid"] = as_bool(d["schema_valid"])
+            d["diverged"] = bool(d["diverged"])
+            d["divergence"] = loads(d["divergence"])
+            d["replay_stats"] = loads(d["replay_stats"])
+            d["messages"] = loads(d["messages"])
+            out.append(d)
+        return out
+
+    def finish_eval_run(self, run_id: str, metrics: dict, per_cluster: dict | None = None) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                text("UPDATE eval_runs SET metrics = :m, per_cluster = :pc, ended_at = :e WHERE id = :id"),
+                {"m": dumps(metrics), "pc": dumps(per_cluster), "e": utcnow(), "id": run_id},
+            )
+
+    def get_eval_run(self, run_id: str) -> dict | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(text("SELECT * FROM eval_runs WHERE id = :id"), {"id": run_id}).mappings().first()
+        if not row:
+            return None
+        run = dict(row)
+        run["metrics"] = loads(run["metrics"])
+        run["paired"] = loads(run["paired"])
+        run["per_cluster"] = loads(run["per_cluster"])
+        return run
+
+    def list_eval_runs(self, eval_set_id: str | None = None) -> list[dict]:
+        q = "SELECT * FROM eval_runs"
+        params: dict[str, Any] = {}
+        if eval_set_id:
+            q += " WHERE eval_set_id = :es"
+            params["es"] = eval_set_id
+        q += " ORDER BY started_at DESC"
+        with self.engine.connect() as conn:
+            rows = conn.execute(text(q), params).mappings().fetchall()
+        out = []
+        for r in rows:
+            run = dict(r)
+            run["metrics"] = loads(run["metrics"])
+            run["per_cluster"] = loads(run["per_cluster"])
+            out.append(run)
+        return out
+
+    def find_eval_run(self, ref: str) -> dict | None:
+        """Resolve a run by id, by id prefix, or as `latest:<subject>`."""
+        if ref.startswith("latest:"):
+            subject = ref.split(":", 1)[1]
+            with self.engine.connect() as conn:
+                row = conn.execute(
+                    text("SELECT id FROM eval_runs WHERE subject = :s ORDER BY started_at DESC LIMIT 1"),
+                    {"s": subject},
+                ).first()
+            return self.get_eval_run(row[0]) if row else None
+        exact = self.get_eval_run(ref)
+        if exact:
+            return exact
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT id FROM eval_runs WHERE id LIKE :p"), {"p": f"{ref}%"}
+            ).fetchall()
+        if len(rows) == 1:
+            return self.get_eval_run(rows[0][0])
+        return None
 
     # ----------------------------------------------------------------------------------------------------------
     # embeddings
