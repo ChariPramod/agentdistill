@@ -1,7 +1,9 @@
-# Example project: a synthetic support agent.
-# Runs end to end with no GPU and no API key:
-#   python generate_traces.py --n 500
-#   agentdistill ingest jsonl traces.jsonl --config project.yaml
+# Example project: a support agent over a real stateful CRM.
+#
+#   python -m examples.support_agent.record --scripted --n 260 --out traces.jsonl
+#   agentdistill ingest jsonl traces-train.jsonl --config project.yaml
+#   agentdistill evalset add support-holdout-v1 eval-holdout.jsonl --config project.yaml
+#   agentdistill evalset add support-unseen-v1  eval-unseen.jsonl  --config project.yaml
 #   agentdistill curate --config project.yaml
 name: support-agent
 registry: sqlite:///.agentdistill/registry.db
@@ -10,12 +12,16 @@ reports: ./reports
 
 sources:
   - type: jsonl
-    path: traces.jsonl
+    path: traces-train.jsonl
 
 curate:
-  filters: [outcome, schema_valid, no_error_loops, length, exact_dedupe, near_dedupe, decontaminate, pii, stratify]
+  # `pii` is deliberately absent. This agent's core tool is get_customer(email), so a redactor that masks emails
+  # rewrites a tool argument in every single trace, and the filter -- correctly, by its own rule -- drops the
+  # entire corpus. An agent whose tools legitimately take personal data as arguments needs pseudonymization that
+  # preserves referential integrity, not masking. See docs/curation.md.
+  filters: [outcome, schema_valid, no_error_loops, length, exact_dedupe, near_dedupe, decontaminate, stratify]
   near_dedupe_threshold: 0.85
-  min_turns: 2
+  min_turns: 1
   max_turns: 40
   clusters: 8
   cap_per_cluster: 120
@@ -24,20 +30,23 @@ curate:
     dim: 128
 
 dataset:
-  max_seq_len: 2048
+  max_seq_len: 4096
   window_turns: 12
 
 train:
-  # The repo's tiny fixture tokenizer, so the example runs offline. Swap for a real 3B-8B instruct model
-  # (check it first with `agentdistill base-check <model>`) before training anything.
+  # The repo's fixture tokenizer, so dataset building runs offline. Swap for a real 3B-8B instruct model --
+  # check it with `agentdistill base-check <model>` -- before training anything.
   base_model: ../../tests/fixtures/tokenizer
   method: sft
-  max_seq_len: 2048
+  max_seq_len: 4096
   epochs: 2
   lr: 1.0e-4
   seed: 17
+  tool_parser:
+    family: agentdistill_fixture
 
 eval:
-  eval_set: support-holdout
+  eval_set: support-holdout-v1
   n_per_task: 5
-  grader: {type: label}
+  policy: strict
+  grader: {type: predicate}

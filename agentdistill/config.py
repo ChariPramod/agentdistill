@@ -219,9 +219,19 @@ class OnPolicyConfig(StrictModel):
 
 
 class GraderConfig(StrictModel):
-    type: Literal["label", "exact", "llm_judge"] = "label"
+    """How a task outcome is decided.
+
+    `predicate` is the strongest: a pure function of the final state, with no model in the loop. `llm_judge` is
+    the fallback for projects without state predicates, and it never gets reported as a bare number -- a judge
+    has its own error rate and the report must say so.
+    """
+
+    type: Literal["label", "exact", "predicate", "replay_predicate", "llm_judge"] = "label"
     rubric: str | None = None
     judge_model: str | None = None
+    #: Dotted path to a callable resolving a trace to its predicate, for `predicate` and `replay_predicate`.
+    #: The example project uses `examples.support_agent.replay_grader:predicate_for_trace`.
+    predicate_source: str | None = None
 
     @model_validator(mode="after")
     def _judge_needs_model(self) -> GraderConfig:

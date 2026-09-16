@@ -177,6 +177,19 @@ def curate(
         err.print("[red]no traces in the registry[/red] — run `agentdistill ingest …` first.")
         raise typer.Exit(code=1)
 
+    # Eval traces share the traces table. They are never training candidates, so they are removed before the
+    # filters run rather than left for decontamination to catch as duplicates of themselves.
+    eval_ids = reg.eval_set_trace_ids()
+    if eval_ids:
+        before = len(traces)
+        traces = [t for t in traces if t["id"] not in eval_ids]
+        held = before - len(traces)
+        if held:
+            console.print(f"[dim]excluded {held} traces belonging to registered eval sets[/dim]")
+    if not traces:
+        err.print("[red]every trace belongs to an eval set[/red]; ingest training traces before curating.")
+        raise typer.Exit(code=1)
+
     eval_inputs = [e["task_input"] for e in reg.eval_set_task_inputs()]
     result = run_curate(traces, cfg, eval_task_inputs=eval_inputs, kind=kind)
 

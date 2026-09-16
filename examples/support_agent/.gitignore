@@ -3,3 +3,6 @@ eval_tasks.jsonl
 .agentdistill/
 artifacts/
 reports/
+traces-train.jsonl
+eval-holdout.jsonl
+eval-unseen.jsonl

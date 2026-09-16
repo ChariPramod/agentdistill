@@ -470,6 +470,26 @@ class Registry:
         es["grader"] = loads(es["grader"])
         return es
 
+    def eval_set_trace_ids(self, names: list[str] | None = None) -> set[str]:
+        """Trace ids belonging to any registered eval set.
+
+        Eval traces live in the same table as training traces, so curation must exclude them explicitly.
+        Decontamination would catch them anyway -- they match themselves exactly -- but only after they have been
+        counted as training candidates, which makes the report read as though the corpus were contaminated when
+        it is simply the eval set being seen twice.
+        """
+        ids: set[str] = set()
+        with self.engine.connect() as conn:
+            if names:
+                params: dict[str, Any] = {f"n{i}": n for i, n in enumerate(names)}
+                ph = ", ".join(f":{k}" for k in params)
+                rows = conn.execute(text(f"SELECT trace_ids FROM eval_sets WHERE name IN ({ph})"), params).fetchall()
+            else:
+                rows = conn.execute(text("SELECT trace_ids FROM eval_sets")).fetchall()
+            for r in rows:
+                ids.update(list(r[0]) if self.dialect == "postgres" else loads(r[0]))
+        return ids
+
     def eval_set_task_inputs(self, names: list[str] | None = None) -> list[dict]:
         """Task inputs of every eval set, for the decontamination filter."""
         with self.engine.connect() as conn:
