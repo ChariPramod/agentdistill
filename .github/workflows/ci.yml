@@ -80,13 +80,28 @@ jobs:
       - run: uv python install 3.12
       - run: uv pip install --system -e ".[dev,tokenizers]"
 
-      - name: Generate, ingest, curate
-        working-directory: examples/support_agent
+      - name: Record, split, ingest, curate
         run: |
-          python generate_traces.py --n 500
-          agentdistill ingest jsonl traces.jsonl --config project.yaml
-          agentdistill evalset add support-holdout eval_tasks.jsonl --config project.yaml
+          python -m examples.support_agent.record --scripted --error-rate 0.25 --n 260 --seed 7 \
+            --out examples/support_agent/traces.jsonl
+          python examples/support_agent/split_corpus.py
+          cd examples/support_agent
+          agentdistill ingest jsonl traces-train.jsonl --config project.yaml
+          agentdistill evalset add support-holdout-v1 eval-holdout.jsonl --config project.yaml
+          agentdistill evalset add support-unseen-v1 eval-unseen.jsonl --config project.yaml
           agentdistill curate --config project.yaml
+
+      - name: The harness reproduces the recording exactly
+        working-directory: examples/support_agent
+        env:
+          PYTHONPATH: ../..
+        run: |
+          agentdistill eval run recorded --eval-set support-holdout-v1 --n 1 --config project.yaml \
+            | tee control.txt
+          grep -q "divergence rate  0.0%" control.txt || {
+            echo "::error::replaying the recording produced divergences; the harness does not reproduce it"
+            exit 1
+          }
 
       - name: Curation is deterministic
         working-directory: examples/support_agent

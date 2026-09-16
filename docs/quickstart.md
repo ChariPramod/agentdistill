@@ -22,11 +22,13 @@ The repo ships a synthetic support agent whose corpus deliberately contains the 
 remove, in known quantities.
 
 ```bash
-cd examples/support_agent
-python generate_traces.py --n 500
+python -m examples.support_agent.record --scripted --error-rate 0.25 --n 260 --seed 7 \
+  --out examples/support_agent/traces.jsonl
+python examples/support_agent/split_corpus.py
 
-agentdistill ingest jsonl traces.jsonl --config project.yaml
-agentdistill evalset add support-holdout eval_tasks.jsonl --config project.yaml
+cd examples/support_agent
+agentdistill ingest jsonl traces-train.jsonl --config project.yaml
+agentdistill evalset add support-holdout-v1 eval-holdout.jsonl --config project.yaml
 agentdistill curate --config project.yaml
 ```
 
@@ -159,4 +161,7 @@ Do not ship a cost number derived from anything in this step.
 ## Next
 
 - [`curation.md`](curation.md) — what each filter does and when to change its default
+- [`evaluation.md`](evaluation.md) — the harness, divergence, and how a paired comparison is read
+- [`canonical-json.md`](canonical-json.md) — the argument-hashing contract shared with mcpgate and agentreplay
 - [`tos.md`](tos.md) — **read before training on a teacher's outputs**
+- [`progress.md`](progress.md) — what is built, what is measured, and every divergence from the plan

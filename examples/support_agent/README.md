@@ -1,72 +1,83 @@
-# Example: a synthetic support agent
+# Example: a support agent over a real CRM
 
 Runs the whole implemented pipeline offline — no GPU, no API key, no network.
 
 ```bash
-python generate_traces.py --n 500
-agentdistill ingest jsonl traces.jsonl --config project.yaml
-agentdistill evalset add support-holdout eval_tasks.jsonl --config project.yaml
+# from the repo root
+python -m examples.support_agent.record --scripted --error-rate 0.25 --n 260 --seed 7 \
+  --out examples/support_agent/traces.jsonl
+python examples/support_agent/split_corpus.py
+
+cd examples/support_agent
+agentdistill ingest jsonl traces-train.jsonl --config project.yaml
+agentdistill evalset add support-holdout-v1 eval-holdout.jsonl --config project.yaml
+agentdistill evalset add support-unseen-v1  eval-unseen.jsonl  --config project.yaml
 agentdistill curate --config project.yaml
+
+PYTHONPATH=../.. agentdistill eval run recorded --eval-set support-holdout-v1 --n 1 --config project.yaml
 ```
 
-## What the corpus contains
+## What is here
 
-The generator is seeded, so the corpus reproduces byte for byte. It is deliberately messy: each failure mode
-curation exists to remove is injected in a known quantity, so the curation report can be checked against
-expectations rather than merely admired.
+| file | what it is |
+|---|---|
+| `crm.py` | A SQLite-backed CRM, deterministic from a seed. Six tools that enforce real rules |
+| `scenarios.py` | 13 scenario shapes, each instantiable with any seed |
+| `graders.py` | End-state predicates: pure functions of the final database plus the final message |
+| `agent.py` | A plain LiteLLM tool-calling loop — the agent whose traces get distilled |
+| `record.py` | Runs tasks, grades them, writes JSONL that `ingest jsonl` accepts |
+| `replay_grader.py` | Rebuilds end state from the student's own calls, for grading under replay |
+| `scripted_teacher.py` | A rule-based solver so the chain runs with no API key |
+| `split_corpus.py` | Splits a recording into training traces and two frozen eval sets |
 
-From 500 clean trajectories it produces 679 records:
+## The scripted solver is not a teacher
 
-| injected | quantity | caught by |
-|---|---|---|
-| exact duplicates | 20 | rejected at ingest on `content_hash` |
-| near-duplicates (one argument changed) | 25 | `near_dedupe` |
-| error loops (3 consecutive tool errors, then recovery) | 25 | `no_error_loops` |
-| invalid tool arguments | 20 | `schema_valid` |
-| unknown tool names | 10 | `schema_valid` |
-| truncated traces (call with no result) | 12 | `schema_valid` |
-| single-turn traces | 12 | `length` |
-| PII in a tool argument | 10 | `pii` |
-| ungraded traces | 20 | `outcome` |
-| genuine failures | 25 | `outcome` (kept under `--kind dpo`) |
-| tasks also present in the eval set | 8 | `decontaminate` |
+`--scripted` uses a rule-based solver. It reacts to real tool results from a real stateful database, so
+trajectories have the right shape, but it is a **generator** — and the whole reason to prefer real traces is that
+a student will happily learn the generator, score wonderfully, and fall over on real traffic.
 
-The error-loop traces are marked **successful** on purpose. An agent that flails through three failed calls and
-then recovers still passes the grader, so `outcome` lets it through and `no_error_loops` is what has to catch it.
-That is also the realistic case: the traces worth removing are rarely the ones already labelled as failures.
+Use it to exercise the pipeline. **Do not train on these traces or publish a number from them.**
 
-Tasks are spread across five types with several phrasings each, so clusters are meaningful and decontamination
-fires on real overlap rather than on shared template boilerplate.
-
-Every filter above fires at its injected quantity, which is what makes this corpus a regression test as well as a
-demo.
-
-## Things worth looking at
-
-**The report.** `reports/curation-support-agent-v1.md` — drop reasons with examples, token and turn histograms,
-tool-call frequencies, and the cluster coverage table.
-
-**The loss mask.**
+For a real corpus:
 
 ```bash
-agentdistill dataset inspect artifacts/datasets/support-agent-v1 --row 0
+python -m examples.support_agent.record --model openai/gpt-4.1 --n 400 --out traces.jsonl
 ```
 
-Green is what the model trains on. It should be assistant turns and nothing else.
+Read [`docs/tos.md`](../../docs/tos.md) first — provider terms govern whether you may train on a model's outputs.
 
-**Determinism.** Run `agentdistill curate --config project.yaml` twice. The second run reports
-`identical to support-agent v1` and writes no new dataset.
+## Why the tools refuse things
 
-**The DPO path.** `agentdistill curate --config project.yaml --kind dpo` keeps the failed trajectories, which is
-what preference pairs need.
+The interesting part of a trajectory is what an agent does when a tool says no. So:
+
+- Only shipped or delivered orders can be refunded, and only once
+- A refund cannot exceed the order total
+- An address cannot be changed once any order has shipped
+- Unknown emails and order ids are errors, not empty results
+
+Scenarios are built around those refusals: an order too early to refund, an id the customer got wrong, two orders
+where only one qualifies, a billing question with nothing refundable behind it.
+
+## The split
+
+| set | n | what it measures |
+|---|---:|---|
+| `traces-train.jsonl` | 144 | training |
+| `support-holdout-v1` | 36 | new instances of scenarios the student trained on |
+| `support-unseen-v1` | 80 | four scenario shapes held out of training entirely |
+
+The unseen set scores lower (66% vs 92% for the solver), and that is the point: it is the number that says
+whether anything generalized rather than being memorized. Report both.
+
+Both eval sets are frozen. They do not change until there is a v1.0 tag — rotating an eval set makes trends
+unreadable.
 
 ## The base model
 
-`project.yaml` points `train.base_model` at `../../tests/fixtures/tokenizer` — a 40 KB BPE tokenizer built for
-the test suite, carrying a tool-capable chat template. It exists so the example runs offline.
-
-It is **not** a model you can train. For a real run, pick a 3B–8B instruct model, check it, and swap it in:
+`project.yaml` points `train.base_model` at `../../tests/fixtures/tokenizer`, a 40 KB tokenizer built for the
+test suite, so dataset building runs offline. It has no weights and cannot be trained; `train sft` says so. For a
+real run pick a 3B–8B instruct model and check it first:
 
 ```bash
-agentdistill base-check <org>/<model-8b-instruct>
+agentdistill base-check <org>/<model-8b-instruct> --config project.yaml
 ```

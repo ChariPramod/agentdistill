@@ -3,10 +3,10 @@
 > Point it at your production agent's traces. Get back a small model that handles the routine calls, a calibrated
 > escalation gate that sends the rest to the frontier model, and a cost report you can hand to a CFO.
 
-**Status: pre-alpha.** Milestone 1 (ingest → curate → dataset) is complete, and SFT training runs end to end.
-Evaluation, the cascade, the router, and serving are not built yet; those commands exit with a pointer to their
-milestone rather than pretending. See [the implementation plan](AgentDistill%20Implementation%20Plan.md) for the
-full roadmap.
+**Status: pre-alpha.** Ingest, curation, dataset building, SFT training, and the replay eval harness are built.
+The cascade, router, gateway, and cost report are not; those commands exit with a pointer to their milestone
+rather than pretending. See [the implementation plan](AgentDistill%20Implementation%20Plan.md) and
+[`docs/progress.md`](docs/progress.md).
 
 **No cost or quality claim in this README has been measured yet.** Nothing is promoted on a loss curve, and the
 paired eval that would justify such a claim lands in milestone 3.
@@ -40,6 +40,9 @@ agentdistill evalset add holdout holdout.jsonl           # register BEFORE curat
 agentdistill curate                                     # filters, dedupes, decontaminates, stratifies
 agentdistill base-check <org>/<model-8b-instruct>        # is this template usable at all?
 agentdistill train sft <dataset>                         # LoRA / QLoRA -> a candidate adapter
+agentdistill eval run <adapter> --eval-set holdout       # replayed tools, predicate grading
+agentdistill eval run base      --eval-set holdout       # the baseline every report needs
+agentdistill eval compare <adapter-run> <base-run>       # paired delta with a 95% CI
 ```
 
 Every dataset is immutable and carries `reports/curation-<dataset>.md`, which states exactly what was dropped and why.

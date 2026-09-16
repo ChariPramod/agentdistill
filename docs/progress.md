@@ -7,14 +7,18 @@ What is built, what is measured, and every place the code deliberately differs f
 | Milestone | State |
 |---|---|
 | M1 — ingest, curate, dataset | **done** |
-| M2 — SFT | **code complete, unmeasured.** No GPU run yet; no throughput or next-action number exists. |
-| M2.5 — real traces | scaffolding built; recording needs a teacher endpoint |
-| M3 — eval harness | in progress |
-| M4–M8 | not started; those commands exit 2 naming their milestone |
+| M2 — SFT | **code complete, unmeasured.** No GPU run; no throughput or next-action number exists. |
+| M2.5 — example agent | **built and tested.** Corpus recorded from a scripted solver, not a teacher. |
+| M3 — eval harness | **done.** Control test passes; `eval run` / `compare` / `show` work end to end. |
+| M4 — on-policy | bridge built (`eval/rollouts.py`); the round loop is not |
+| M5–M8 | not started; those commands exit 2 naming their milestone |
 
-**No cost or quality claim has been measured.** Adapters can only reach `candidate`. The sentence this phase
-exists to produce — "on N real held-out tasks the student scores X% versus the teacher's Y%, delta with a 95% CI"
-— is not yet true.
+**The sentence this phase exists to produce is still not true.** It requires a student, and a student requires a
+GPU run this environment cannot do. What exists is every piece around it: the harness reproduces recordings
+exactly, the statistics are simulation-tested, and a paired comparison between two subjects prints a correct
+report with an interval. Point it at a trained adapter and the number appears.
+
+Adapters can only reach `candidate`. No cost or quality claim has been measured.
 
 ## Divergences from the implementation plan
 
@@ -61,10 +65,53 @@ otherwise, reporting which one ran. `parse_with_vllm` returns `None` for "could 
 **Why:** conflating "no parser available" with "no tool call found" would turn a missing dependency into a
 passing check. The fallback is explicitly labelled as weaker assurance.
 
+### The pii filter and agents whose tools take personal data (found in M2.5)
+
+The `pii` filter dropped 100% of the example corpus. It was behaving exactly as specified: the rule is "drop any
+trace where redaction changed a tool argument", the agent's core tool is `get_customer(email)`, so every trace
+qualifies.
+
+The rule is right — a student that learns `<EMAIL>` is a valid argument will send that placeholder to a real API.
+But it means **an agent whose tools legitimately take personal data cannot use masking-based redaction at all.**
+It needs pseudonymization that preserves referential integrity: a stable fake email per real one, so the
+trajectory still makes sense and no real address survives. That is not built; the example disables the filter and
+says why inline.
+
+### Eval traces were being curated as training data (found in M2.5)
+
+`curate` reads every trace in the registry, and eval traces live in the same table. Decontamination caught them —
+they match themselves exactly — but only after counting them as training candidates, so the report read as a
+contaminated corpus rather than the eval set being seen twice. They are now excluded before the filters run.
+
+### Nondeterministic state in the example CRM (found in M3)
+
+Tracking numbers were built from Python's built-in `hash()`, which is randomized per process. The replay grader
+rebuilds state in a different process from the recorder, so every tracking-related predicate failed on
+reconstruction. Fixed with a sha256 digest; the equivalence test now agrees 260/260.
+
+This is the bug `test_replay_predicate_matches_live` exists to catch, and it would have silently corrupted every
+eval number involving a tracking number.
+
 ## Blocked on hardware or credentials
 
 | Item | Blocker |
 |---|---|
 | Real GPU run (next-phase §2.6) | No GPU. Code path is CPU-smoke-tested on a tiny model; throughput, eval loss, and next-action numbers are unmeasured. |
 | vLLM parser path, `VllmOfflineTurnClient` | vLLM does not install on macOS ARM. Import-guarded and skipped, not stubbed. |
-| Recording real teacher traces (next-phase §3) | Needs a teacher endpoint. The agent, CRM, scenarios, and graders are built and tested against a scripted teacher; `record.py` needs only a model name and credentials. |
+| Recording real teacher traces (next-phase §3) | Needs a teacher endpoint. The agent, CRM, scenarios, and graders are built and tested; `record.py --model <id>` needs only credentials. |
+| The M3 definition of done (`base` vs adapter vs teacher on one GPU) | Needs a trained adapter. The harness, graders, statistics, and report are done and tested; the missing input is a student. |
+
+## Where the example corpus falls short of the plan
+
+The next-phase plan asks for 40 scenarios × 10 instances = 400 tasks recorded from a real teacher. What exists is
+13 scenario shapes × 20 instances = 260 tasks recorded from a rule-based solver.
+
+- **13 shapes, not 40.** Each shape carries a real wrinkle (ineligible orders, wrong ids, two orders where only
+  one qualifies, requests whose right answer is to refuse). More shapes would improve cluster diversity and the
+  generalization measurement; these were chosen over 40 shallow ones.
+- **A scripted solver, not a teacher.** `scripted_teacher.py` reacts to real tool results from a real stateful
+  database, so trajectories have the right shape — but it is a generator, and the plan is right that a student
+  would learn the generator. These traces are for exercising the pipeline. **They must not be trained on or used
+  to publish a number.**
+- **Error injection is uneven.** It perturbs refund actions only, so read-only scenarios sit at 100% and the
+  recorder correctly flags them as unable to separate a student from the teacher.
