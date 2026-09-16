@@ -14,12 +14,13 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import Engine, create_engine, event, text
+from sqlalchemy.exc import OperationalError
 
 MIGRATIONS = Path(__file__).resolve().parent / "migrations"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 #: Migrations are applied in order; each is idempotent.
-MIGRATION_FILES = ("001_init.sql", "002_eval_results.sql")
+MIGRATION_FILES = ("001_init.sql", "002_eval_results.sql", "003_phase3.sql")
 
 
 def utcnow() -> str:
@@ -147,7 +148,13 @@ class Registry:
                 for stmt in split_statements(sql_path.read_text()):
                     if stmt.upper().startswith("PRAGMA") and self.dialect != "sqlite":
                         continue
-                    conn.execute(text(stmt))
+                    try:
+                        conn.execute(text(stmt))
+                    except OperationalError as e:
+                        # SQLite has no `ADD COLUMN IF NOT EXISTS`, so re-running a migration that adds a column
+                        # raises rather than being a no-op. Every other statement is already idempotent.
+                        if "duplicate column name" not in str(e).lower():
+                            raise
             if not self._has_version(conn):
                 conn.execute(
                     text("INSERT INTO schema_version (version, applied_at) VALUES (:v, :t)"),
@@ -425,15 +432,17 @@ class Registry:
             conn.execute(
                 text(
                     """INSERT INTO adapters (id, training_run_id, name, version, base_model, merged, quantization,
-                                             path, status, created_at)
+                                             path, status, created_at, tag, parent_adapter_id)
                        VALUES (:id, :training_run_id, :name, :version, :base_model, :merged, :quantization,
-                               :path, :status, :created_at)"""
+                               :path, :status, :created_at, :tag, :parent_adapter_id)"""
                 ),
                 {
                     "merged": False,
                     "quantization": None,
                     "status": "candidate",
                     "created_at": utcnow(),
+                    "tag": None,
+                    "parent_adapter_id": None,
                     **adapter,
                 },
             )
@@ -528,15 +537,17 @@ class Registry:
     # eval runs and results
     # ----------------------------------------------------------------------------------------------------------
 
-    def start_eval_run(self, run_id: str, eval_set_id: str, subject: str, n_per_task: int) -> None:
+    def start_eval_run(
+        self, run_id: str, eval_set_id: str, subject: str, n_per_task: int, tag: str | None = None
+    ) -> None:
         with self.engine.begin() as conn:
             conn.execute(
                 text(
-                    """INSERT INTO eval_runs (id, eval_set_id, subject, n_per_task, metrics, started_at)
-                       VALUES (:id, :es, :subject, :n, :metrics, :started)"""
+                    """INSERT INTO eval_runs (id, eval_set_id, subject, n_per_task, metrics, started_at, tag)
+                       VALUES (:id, :es, :subject, :n, :metrics, :started, :tag)"""
                 ),
                 {"id": run_id, "es": eval_set_id, "subject": subject, "n": n_per_task,
-                 "metrics": dumps({}), "started": utcnow()},
+                 "metrics": dumps({}), "started": utcnow(), "tag": tag},
             )
 
     def write_eval_result(self, run_id: str, outcome: Any, cluster: int | None = None,

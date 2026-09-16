@@ -36,6 +36,8 @@ class RunSpec:
     policy: str = "strict"
     max_turns: int = 12
     fuzzy_threshold: float = 0.92
+    #: Groups the runs of one session so `eval latest --tag` can find them.
+    tag: str | None = None
 
 
 def label_grader(trace: dict, outcome: TaskOutcome) -> tuple[bool, dict]:
@@ -60,7 +62,7 @@ def run_eval(
 ) -> str:
     """Run every task `n_per_task` times, grade each, and store the rows. Returns the run id."""
     run_id = f"ev_{uuid.uuid4().hex[:16]}"
-    registry.start_eval_run(run_id, eval_set["id"], spec.subject, spec.n_per_task)
+    registry.start_eval_run(run_id, eval_set["id"], spec.subject, spec.n_per_task, tag=spec.tag)
 
     task_ids = [t for t in eval_set["trace_ids"] if t in traces_by_task]
     total = len(task_ids) * spec.n_per_task

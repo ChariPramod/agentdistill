@@ -418,6 +418,102 @@ def evalset_list(config: str = typer.Option("project.yaml")) -> None:
         console.print(f"{name}: {len(es['trace_ids'])} tasks{status}")
 
 
+# --------------------------------------------------------------------------------------------------------------
+# Selectors. The GPU-day script substitutes these straight into the next command, so they print one bare id and
+# exit non-zero with a message rather than printing nothing.
+# --------------------------------------------------------------------------------------------------------------
+
+
+def _select(fn, **kwargs) -> dict:
+    from agentdistill.registry.select import Ambiguous, NoMatch
+
+    try:
+        return fn(**kwargs)
+    except (NoMatch, Ambiguous) as e:
+        err.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+
+
+@dataset_app.command("latest")
+def dataset_latest(
+    name: str | None = typer.Option(None, help="Dataset name."),
+    kind: str | None = typer.Option(None, help="sft, dpo, or eval."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Print the newest dataset's id. Used by scripts/gpu_day.sh."""
+    from agentdistill.registry.select import latest_dataset
+
+    row = _select(latest_dataset, registry=_registry(_load(config)), name=name, kind=kind)
+    print(row["id"])
+
+
+@adapter_app.command("latest")
+def adapter_latest(
+    tag: str | None = typer.Option(None, help="Exact tag, or a glob like 'gpu-day*'."),
+    status: str | None = typer.Option(None),
+    quantized: bool = typer.Option(False, "--quantized", help="Only quantized artifacts."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Print the newest adapter's id."""
+    from agentdistill.registry.select import latest_adapter
+
+    row = _select(latest_adapter, registry=_registry(_load(config)), tag=tag, status=status,
+                  quantized=True if quantized else None)
+    print(row["id"])
+
+
+@adapter_app.command("best")
+def adapter_best(
+    tag: str | None = typer.Option(None, help="Exact tag, or a glob like 'gpu-day*'."),
+    eval_set: str | None = typer.Option(None, help="Rank by success on this eval set."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Print the id of the adapter with the highest measured success.
+
+    Ranks by measured success, so an adapter with no eval run is not a candidate however new it is: picking one
+    would put an unmeasured model into the report.
+    """
+    from agentdistill.registry.select import best_adapter
+
+    cfg = _load(config)
+    row = _select(best_adapter, registry=_registry(cfg), tag=tag, eval_set=eval_set or cfg.eval.eval_set)
+    print(row["id"])
+
+
+@eval_app.command("latest")
+def eval_latest(
+    subject: str | None = typer.Option(None),
+    tag: str | None = typer.Option(None, help="Exact tag, or a glob."),
+    eval_set: str | None = typer.Option(None),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Print the newest matching eval run's id."""
+    from agentdistill.registry.select import latest_eval
+
+    row = _select(latest_eval, registry=_registry(_load(config)), subject=subject, tag=tag, eval_set=eval_set)
+    print(row["id"])
+
+
+@app.command("config")
+def config_cmd(
+    action: str = typer.Argument(..., help="Only 'get' is supported."),
+    key: str = typer.Argument(..., help="Dotted path, e.g. train.base_model."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Print one config value. Used by scripts/gpu_day.sh so the script has no duplicated settings."""
+    if action != "get":
+        err.print("[red]only `config get <key>` is supported[/red]")
+        raise typer.Exit(code=1)
+    cfg = _load(config)
+    node: Any = cfg
+    for part in key.split("."):
+        node = getattr(node, part, None) if not isinstance(node, dict) else node.get(part)
+        if node is None:
+            err.print(f"[red]no config value at {key!r}[/red]")
+            raise typer.Exit(code=1)
+    print(node)
+
+
 @app.command("base-check")
 def base_check(
     model: str = typer.Argument(..., help="Base model id or local path."),
@@ -784,7 +880,7 @@ def _run_recorded(reg, es, traces_by_task, grader, spec, store_messages, tick):
     from agentdistill.eval.runner import aggregate
 
     run_id = f"ev_{uuid.uuid4().hex[:16]}"
-    reg.start_eval_run(run_id, es["id"], spec.subject, spec.n_per_task)
+    reg.start_eval_run(run_id, es["id"], spec.subject, spec.n_per_task, tag=spec.tag)
     done = 0
     for trace_id in es["trace_ids"]:
         trace = traces_by_task.get(trace_id)
