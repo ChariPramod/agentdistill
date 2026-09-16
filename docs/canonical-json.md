@@ -70,3 +70,7 @@ rounding, integer-versus-float, negative zero, booleans and null, dropped volati
 a UUID inside an array, array ordering, and empty arguments.
 
 If you need a rule the vectors do not cover, add a vector in the same commit as the rule.
+
+## Opt-in MCPGate shared migration
+
+`canonical_shared.py` adds the shared format used by MCPGate audit `args_hash_v=1`. It normalizes integral floats and signed zero like JavaScript and uses six-decimal formatting with ties away from zero. `schemas/canonical-shared-vectors.json` is identical to MCPGate's shared fixture. The existing `canonical.py` API and v1 fixtures remain unchanged so stored replay indexes are not invalidated. Importers must explicitly select `canonical_shared.args_hash` for MCPGate versioned rows. Exact approval/integrity hashes must not use this lossy replay format.

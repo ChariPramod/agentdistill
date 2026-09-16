@@ -1209,9 +1209,122 @@ def eval_show(
 
 
 @app.command()
-def calibrate(adapter: str, config: str = "project.yaml") -> None:
-    """Fit the confidence gate, choose the threshold, verify with the harness."""
-    _not_built("calibration", "milestone 5")
+def calibrate(
+    adapter: str = typer.Argument(..., help="The adapter whose gate is being fitted."),
+    from_eval: str | None = typer.Option(None, "--from-eval", help="Eval run supplying the labelled turns."),
+    out: str | None = typer.Option(None, help="Where to write the calibration artifact."),
+    max_drop_pp: float | None = typer.Option(None, help="Success-drop budget for the threshold search."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Fit the confidence gate, choose a threshold, and report the gate's own reliability.
+
+    Fitted on a task-disjoint split and reported on the half it never saw: in-sample calibration error is
+    optimistic by construction. The artifact that ships is refit on everything, because holdout numbers are about
+    honesty rather than shipping a weaker model.
+
+    If the gate is not good enough to threshold on, this says so and the cascade escalates everything. That is the
+    documented default: a cascade with a meaningless gate is worse than no cascade.
+    """
+    import numpy as np
+
+    from agentdistill.cascade.calibrate import fit_calibrator, save
+    from agentdistill.cascade.features import matrix
+    from agentdistill.cascade.labels import label_rollouts
+    from agentdistill.cascade.threshold import choose_threshold, verification_points
+
+    cfg = _load(config)
+    reg = _registry(cfg)
+
+    if not from_eval:
+        err.print(
+            "[red]--from-eval is required[/red]: the gate is fitted on turns from an eval run recorded with "
+            "`eval run <adapter> --logprobs`, on a task set disjoint from training."
+        )
+        raise typer.Exit(code=1)
+    run = reg.find_eval_run(from_eval)
+    if run is None:
+        err.print(f"[red]no eval run matching {from_eval!r}[/red]")
+        raise typer.Exit(code=1)
+
+    rows = reg.eval_results(run["id"])
+    rollouts = [
+        {"id": f"{r['task_id']}#{r['repeat_idx']}", "task_id": r["task_id"], "success": r["success"],
+         "messages": r["messages"] or []}
+        for r in rows if r.get("messages")
+    ]
+    if not rollouts:
+        err.print(
+            "[red]that eval run stored no trajectories[/red], so there are no turns to label. "
+            "Re-run it without --no-store-messages."
+        )
+        raise typer.Exit(code=1)
+
+    teacher_by_task = {}
+    for trace_id in reg.get_eval_set(run["eval_set_id"].removeprefix("es_"))["trace_ids"] \
+            if reg.get_eval_set(run["eval_set_id"].removeprefix("es_")) else []:
+        trace = reg.get_trace(trace_id)
+        if trace:
+            teacher_by_task[trace.get("task_id") or trace["id"]] = trace
+
+    records, label_stats = label_rollouts(rollouts, teacher_by_task)
+    console.print(f"labelled {label_stats['n']} turns  mix={label_stats['mix']}")
+    if label_stats["weak_share"] > 0.5:
+        console.print(
+            f"[yellow]{label_stats['weak_share']:.0%} of labels are `uncorrected`[/yellow], which is an "
+            f"assumption rather than evidence. Read the AUROC with that in mind."
+        )
+
+    # Without stored logprobs there are no confidence features to fit on.
+    if not any(r.get("features") for r in records):
+        err.print(
+            "[red]no per-turn logprobs in that eval run[/red]. The gate's features come from "
+            "`eval run <adapter> --logprobs --samples 3`, which needs the vLLM backend on a GPU. "
+            "See scripts/gpu_day.sh, stage `logprobs`."
+        )
+        raise typer.Exit(code=1)
+
+    features = [r["features"] for r in records]
+    y = np.array([int(r["good"]) for r in records])
+    task_ids = [r["task_id"] for r in records]
+    names = list(cfg.cascade.features)
+    result = fit_calibrator(matrix(features, names), y, task_ids, names, label_mix=label_stats["mix"])
+
+    for note in result.notes:
+        console.print(f"[yellow]note:[/yellow] {note}")
+    if result.holdout:
+        h = result.holdout
+        console.print(
+            f"holdout  AUROC {h.get('auroc', float('nan')):.3f}  Brier {h.get('brier', float('nan')):.3f}  "
+            f"ECE {h.get('ece', float('nan')):.3f}  (n={h.get('n')})"
+        )
+        console.print(f"in-sample AUROC {result.in_sample.get('auroc', float('nan')):.3f} [dim](optimistic)[/dim]")
+
+    path = Path(out) if out else cfg.artifacts_dir / "calibration" / f"{adapter}"
+    save(result, path)
+    console.print(f"[green]wrote[/green] {path}")
+
+    if not result.usable:
+        console.print("[yellow]gate not usable; the cascade will escalate everything and the report says so.[/yellow]")
+        return
+
+    p = result.model.predict_proba(matrix(features, names))[:, 1]
+    choice = choose_threshold(
+        p, y.astype(bool), np.array(task_ids), dict.fromkeys(set(task_ids), True),
+        max_success_drop_pp=max_drop_pp if max_drop_pp is not None else cfg.cascade.max_success_drop_pp,
+    )
+    if choice.chosen is None:
+        console.print(f"[yellow]{choice.note}[/yellow]")
+        return
+    console.print(
+        f"threshold {choice.chosen.threshold:.2f}  escalation {choice.chosen.escalation_rate:.0%}  "
+        f"estimated success {choice.chosen.cascade_success:.1%}"
+    )
+    console.print(
+        "  [dim]analytic estimate; it assumes an escalated turn is as good as the teacher's, which is optimistic "
+        "because the teacher answers on a prefix the student built. Verify with "
+        f"`eval run cascade:{adapter}:auto --verify-threshold` at {verification_points(choice.chosen.threshold)}."
+        "[/dim]"
+    )
 
 
 @adapter_app.command("merge")

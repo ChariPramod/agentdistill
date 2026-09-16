@@ -204,7 +204,6 @@ def test_base_check_on_a_missing_model(project):
 @pytest.mark.parametrize(
     ("args", "fragment"),
     [
-        (("calibrate", "a"), "milestone 5"),
         (("serve",), "milestone 6"),
         (("retrain",), "milestone 7"),
         (("report",), "milestone 8"),
@@ -217,6 +216,15 @@ def test_unbuilt_commands_say_so_clearly(project, args, fragment):
     assert result.exit_code == 2
     assert "not built yet" in out(result)
     assert fragment in out(result)
+
+
+def test_calibrate_is_implemented(project):
+    """`calibrate` is built; it must explain what it needs rather than report itself unbuilt."""
+    _init(project)
+    result = run("calibrate", "some-adapter")
+    combined = out(result)
+    assert "not built yet" not in combined
+    assert "--from-eval is required" in combined
 
 
 def test_train_onpolicy_is_implemented(project):

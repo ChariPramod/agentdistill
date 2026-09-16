@@ -598,10 +598,11 @@ class Registry:
                     """INSERT INTO eval_results (id, eval_run_id, task_id, repeat_idx, success, schema_valid,
                                                  diverged, divergence, n_turns, n_tool_calls,
                                                  completion_tokens_est, latency_ms, stop_reason, grader_detail,
-                                                 replay_stats, final_text, messages, cluster)
+                                                 replay_stats, final_text, messages, cluster, escalations,
+                                                 wasted_student_tokens)
                        VALUES (:id, :run, :task, :repeat, :success, :schema_valid, :diverged, :divergence,
                                :n_turns, :n_tool_calls, :tokens, :latency, :stop, :detail, :replay, :final,
-                               :messages, :cluster)"""
+                               :messages, :cluster, :escalations, :wasted)"""
                 ),
                 {
                     "id": f"er_{uuid.uuid4().hex[:16]}",
@@ -624,6 +625,8 @@ class Registry:
                     # find out why a number moved, but `eval run --no-store-messages` turns it off.
                     "messages": dumps(outcome.messages) if store_messages else None,
                     "cluster": cluster,
+                    "escalations": row.get("escalations", 0),
+                    "wasted": row.get("wasted_student_tokens", 0),
                 },
             )
 

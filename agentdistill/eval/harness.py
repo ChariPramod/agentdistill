@@ -40,6 +40,10 @@ class TaskOutcome:
     latency_ms: int
     completion_tokens_est: int
     stop_reason: str
+    #: Cascade subjects only: how many turns the gate sent to the teacher, and what the discarded student
+    #: generations cost. Zero for a plain student or teacher run.
+    escalations: int = 0
+    wasted_student_tokens: int = 0
     success: bool | None = None
     grader_detail: str = ""
     grader_out: dict = field(default_factory=dict)
@@ -58,6 +62,8 @@ class TaskOutcome:
             "latency_ms": self.latency_ms,
             "completion_tokens_est": self.completion_tokens_est,
             "stop_reason": self.stop_reason,
+            "escalations": self.escalations,
+            "wasted_student_tokens": self.wasted_student_tokens,
             "success": self.success,
             "grader_detail": self.grader_detail,
         }
@@ -132,6 +138,9 @@ def run_task(
     final_text = next((m.get("content") or "" for m in reversed(messages) if m["role"] == "assistant"), "")
     schema_ok, _ = tool_calls_valid({"messages": messages, "tools": tools})
 
+    # A cascade client knows what the gate did; a plain client does not have a summary and reports zeros.
+    gate = client.summary() if hasattr(client, "summary") else {}
+
     return TaskOutcome(
         task_id=trace.get("task_id") or trace["id"],
         repeat_idx=repeat_idx,
@@ -146,6 +155,8 @@ def run_task(
         latency_ms=int((time.time() - started) * 1000),
         completion_tokens_est=tokens,
         stop_reason=stop_reason,
+        escalations=int(gate.get("escalations", 0)),
+        wasted_student_tokens=int(gate.get("wasted_student_tokens", 0)),
     )
 
 

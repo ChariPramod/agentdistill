@@ -1,0 +1,274 @@
+{
+  "version": 2,
+  "vectors": [
+    {
+      "name": "key_order",
+      "tool": "search_orders",
+      "args": {
+        "limit": 5,
+        "customer_id": "c_9"
+      },
+      "normalized": {
+        "limit": 5,
+        "customer_id": "c_9"
+      },
+      "canonical": "{\"args\":{\"customer_id\":\"c_9\",\"limit\":5},\"tool\":\"search_orders\"}",
+      "args_hash": "6e50d080f5bc66b1702cd3188eebd1accfbff51c505c1e08fbc317949728f8c9"
+    },
+    {
+      "name": "nested_objects",
+      "tool": "update_address",
+      "args": {
+        "customer_id": "c_1",
+        "address": {
+          "zip": "02139",
+          "city": "Cambridge",
+          "street": "12 Main St"
+        }
+      },
+      "normalized": {
+        "customer_id": "c_1",
+        "address": {
+          "zip": "02139",
+          "city": "Cambridge",
+          "street": "12 Main St"
+        }
+      },
+      "canonical": "{\"args\":{\"address\":{\"city\":\"Cambridge\",\"street\":\"12 Main St\",\"zip\":\"02139\"},\"customer_id\":\"c_1\"},\"tool\":\"update_address\"}",
+      "args_hash": "c3469c544d86b3bcb6a8b8095e608d59285b17fa87ba5c78b3cd99f27a44aba1"
+    },
+    {
+      "name": "unicode_preserved",
+      "tool": "create_ticket",
+      "args": {
+        "summary": "café — naïve résumé",
+        "category": "billing"
+      },
+      "normalized": {
+        "summary": "café — naïve résumé",
+        "category": "billing"
+      },
+      "canonical": "{\"args\":{\"category\":\"billing\",\"summary\":\"café — naïve résumé\"},\"tool\":\"create_ticket\"}",
+      "args_hash": "2e88e5bf3fc83a36b4f80fdec0729ada5b721f8b1de99131eeda6fe056f8f221"
+    },
+    {
+      "name": "string_trimmed",
+      "tool": "get_customer",
+      "args": {
+        "email": "  bob@example.com  "
+      },
+      "normalized": {
+        "email": "bob@example.com"
+      },
+      "canonical": "{\"args\":{\"email\":\"bob@example.com\"},\"tool\":\"get_customer\"}",
+      "args_hash": "3192927b6e482860edbf95be68011572fbc0d4c9be743667bc21e9f6b4ebb64f"
+    },
+    {
+      "name": "float_rounding",
+      "tool": "issue_refund",
+      "args": {
+        "order_id": "o_1",
+        "amount": 42.5000000001
+      },
+      "normalized": {
+        "order_id": "o_1",
+        "amount": 42.5
+      },
+      "canonical": "{\"args\":{\"amount\":42.5,\"order_id\":\"o_1\"},\"tool\":\"issue_refund\"}",
+      "args_hash": "3ee8f16184a0674f590b7c61b29c06f06a471d9ba10acbe924cffe975f15606f"
+    },
+    {
+      "name": "int_not_float",
+      "tool": "list_orders",
+      "args": {
+        "limit": 5
+      },
+      "normalized": {
+        "limit": 5
+      },
+      "canonical": "{\"args\":{\"limit\":5},\"tool\":\"list_orders\"}",
+      "args_hash": "6eb18e070bfd2afc5b3ab1c981d678a8a52149f3a365de42a17d753e6bd04fb4"
+    },
+    {
+      "name": "negative_zero",
+      "tool": "issue_refund",
+      "args": {
+        "order_id": "o_1",
+        "amount": -0.0
+      },
+      "normalized": {
+        "order_id": "o_1",
+        "amount": -0.0
+      },
+      "canonical": "{\"args\":{\"amount\":0,\"order_id\":\"o_1\"},\"tool\":\"issue_refund\"}",
+      "args_hash": "39d0e9c3d915e3436e3a71c23b5312aa375c4705228a88cb0e0bf587c60c6fe9"
+    },
+    {
+      "name": "booleans_and_null",
+      "tool": "list_orders",
+      "args": {
+        "include_cancelled": true,
+        "status": null
+      },
+      "normalized": {
+        "include_cancelled": true,
+        "status": null
+      },
+      "canonical": "{\"args\":{\"include_cancelled\":true,\"status\":null},\"tool\":\"list_orders\"}",
+      "args_hash": "97273bc84e68c5b6c32a24c9c0b7f280ffeee25a7492a2f1e57b02b3d6dbbd08"
+    },
+    {
+      "name": "drop_volatile_keys",
+      "tool": "get_order",
+      "args": {
+        "order_id": "o_1",
+        "request_id": "req_abc",
+        "timestamp": "2026-09-15T12:00:00Z",
+        "nonce": "xyz"
+      },
+      "normalized": {
+        "order_id": "o_1"
+      },
+      "canonical": "{\"args\":{\"order_id\":\"o_1\"},\"tool\":\"get_order\"}",
+      "args_hash": "10ad418623141f80a9e33e3ae22db1c7743ea7ea7dadc92e2c91a23dddf95c0f"
+    },
+    {
+      "name": "timestamp_formats",
+      "tool": "list_orders",
+      "args": {
+        "a": "2026-09-15",
+        "b": "2026-09-15T12:00:00Z",
+        "c": "2026-09-15T12:00:00.123+05:30"
+      },
+      "normalized": {
+        "a": "<ts>",
+        "b": "<ts>",
+        "c": "<ts>"
+      },
+      "canonical": "{\"args\":{\"a\":\"<ts>\",\"b\":\"<ts>\",\"c\":\"<ts>\"},\"tool\":\"list_orders\"}",
+      "args_hash": "77c095137c50ef4b2e823759c7409904c050a10951375d6dd0c5ea66cd4867e9"
+    },
+    {
+      "name": "uuid_in_array",
+      "tool": "create_ticket",
+      "args": {
+        "refs": [
+          "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+          "not-a-uuid"
+        ]
+      },
+      "normalized": {
+        "refs": [
+          "<uuid>",
+          "not-a-uuid"
+        ]
+      },
+      "canonical": "{\"args\":{\"refs\":[\"<uuid>\",\"not-a-uuid\"]},\"tool\":\"create_ticket\"}",
+      "args_hash": "e42624ea04d2e29051b1621e32e1e7d5a5b2878076f0533558eb394f735b14d4"
+    },
+    {
+      "name": "array_order_significant",
+      "tool": "create_ticket",
+      "args": {
+        "tags": [
+          "b",
+          "a"
+        ]
+      },
+      "normalized": {
+        "tags": [
+          "b",
+          "a"
+        ]
+      },
+      "canonical": "{\"args\":{\"tags\":[\"b\",\"a\"]},\"tool\":\"create_ticket\"}",
+      "args_hash": "4e536b5b02a7f2abfed760afa28237553085a1aaef32a6aeed5527decfd5e34a"
+    },
+    {
+      "name": "empty_args",
+      "tool": "list_orders",
+      "args": {},
+      "normalized": {},
+      "canonical": "{\"args\":{},\"tool\":\"list_orders\"}",
+      "args_hash": "f49caeb27a2718b6d93cb0126f6ed531e70f9e4bceaf4c8c91cdea39c47a53e5"
+    },
+    {
+      "name": "rounding_tie",
+      "tool": "test",
+      "args": {
+        "value": 0.1234565
+      },
+      "normalized": {
+        "value": 0.123456
+      },
+      "canonical": "{\"args\":{\"value\":0.123456},\"tool\":\"test\"}",
+      "args_hash": "9a84cac25f9682a12f5578fa6ced3d80de5d984de388c209f3e3ed1dcd1a1452"
+    },
+    {
+      "name": "small_float",
+      "tool": "test",
+      "args": {
+        "value": 2.5e-07
+      },
+      "normalized": {
+        "value": 0.0
+      },
+      "canonical": "{\"args\":{\"value\":0},\"tool\":\"test\"}",
+      "args_hash": "4ac9a473f5cb2a053275564bd8740968bdb6bbd7ffdbbfd856a1ffc5493d3cd5"
+    },
+    {
+      "name": "large_float",
+      "tool": "test",
+      "args": {
+        "value": 1e+21
+      },
+      "normalized": {
+        "value": 1e+21
+      },
+      "canonical": "{\"args\":{\"value\":1e+21},\"tool\":\"test\"}",
+      "args_hash": "32a4773858b3e2688111b4cb4ba2b3667f01d243cf06b660c82deea9c26f9216"
+    },
+    {
+      "name": "binary_tie",
+      "tool": "test",
+      "args": {
+        "value": 0.0078125
+      },
+      "normalized": {
+        "value": 0.007813
+      },
+      "canonical": "{\"args\":{\"value\":0.007813},\"tool\":\"test\"}",
+      "args_hash": "af819d251bcabfa9e3f4016a1cd8ca755d6fd0a7b30594f53ebd3f7df2baf6d7"
+    },
+    {
+      "name": "negative_tie",
+      "tool": "test",
+      "args": {
+        "value": -0.0078125
+      },
+      "normalized": {
+        "value": -0.007813
+      },
+      "canonical": "{\"args\":{\"value\":-0.007813},\"tool\":\"test\"}",
+      "args_hash": "d54541dce085e598fa03c9c0a984afc2d4c375b43ea421406441351b7b75ae4f"
+    },
+    {
+      "name": "unicode_keys",
+      "tool": "test",
+      "args": {
+        "value": {
+          "😀": 1,
+          "": 2
+        }
+      },
+      "normalized": {
+        "value": {
+          "😀": 1,
+          "": 2
+        }
+      },
+      "canonical": "{\"args\":{\"value\":{\"\":2,\"😀\":1}},\"tool\":\"test\"}",
+      "args_hash": "75fdc45694fea0abebaae66baf15a6d9f97ba95b6ca2324e6b600515ed78056b"
+    }
+  ]
+}
