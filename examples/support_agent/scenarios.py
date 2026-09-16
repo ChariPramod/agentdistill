@@ -45,7 +45,14 @@ class Task:
 
 SCENARIOS: dict[str, Builder] = {}
 #: Scenarios deliberately excluded from training, for the unseen-shape eval set.
-HELD_OUT_SCENARIOS = ("refund_partial_shipment", "wrong_item_two_orders", "address_after_ship", "duplicate_charge")
+HELD_OUT_SCENARIOS = (
+    "refund_partial_shipment",      # the customer overstates the amount
+    "wrong_item_two_orders",        # pick the right order from a description
+    "address_after_ship",           # a tool refusal that must become an escalation
+    "duplicate_charge",             # a billing question with nothing refundable behind it
+    "two_damaged_both_eligible",    # more than one refund is correct
+    "refund_all_ineligible",        # every order is ineligible
+)
 
 
 def scenario(name: str) -> Callable[[Builder], Builder]:
@@ -80,6 +87,116 @@ def _customer(rng: random.Random, seed: int, idx: int = 0) -> Customer:
 
 
 def _phrase(rng: random.Random, options: list[str], **kw: Any) -> str:
+    return rng.choice(options).format(**kw)
+
+
+
+# --------------------------------------------------------------------------------------------------------------
+# compact scenario builder
+# --------------------------------------------------------------------------------------------------------------
+
+
+
+#: Real customers open and close a message in a dozen different ways. Without this, every instance of a scenario
+#: is near-identical text, which makes decontamination fire on the shared boilerplate between a training instance
+#: and a holdout instance of the same shape, and makes clustering trivial.
+_OPENERS = [
+    "", "Hi, ", "Hello, ", "Hi there — ", "Good morning. ", "Afternoon. ", "Hey, ",
+    "Sorry to bother you, but ", "Quick question: ", "I hope you can help. ",
+]
+_CLOSERS = [
+    "", " Thanks.", " Thanks in advance.", " Please let me know.", " Appreciate your help.",
+    " Looking forward to hearing back.", " Cheers.", " Many thanks for your time.",
+    " Let me know what you can do.", " I would appreciate a quick reply.",
+]
+_ASIDES = [
+    "", " I have been a customer for years.", " This is my first time contacting support.",
+    " Apologies if this is the wrong channel.", " I did try the help pages first.",
+    " No rush, whenever you get a chance.", " I am happy to provide more detail if needed.",
+]
+
+
+def _vary(rng: random.Random, message: str) -> str:
+    """Wrap a request in a varied opener, aside, and closer."""
+    opener = rng.choice(_OPENERS)
+    body = message[0].lower() + message[1:] if opener and message[:1].isupper() and not message[:1].isdigit() \
+        else message
+    return f"{opener}{body}{rng.choice(_ASIDES)}{rng.choice(_CLOSERS)}".strip()
+
+
+@dataclass
+class OrderSpec:
+    """One order to seed. `key` names it so a predicate can refer to it without knowing the id format."""
+
+    key: str
+    status: str
+    total: float | None = None
+    item: str | None = None
+    placed_on: str = "2026-08-15"
+    carrier: str | None = None
+
+
+def simple(
+    name: str,
+    *,
+    orders: Callable[[random.Random], list[OrderSpec]],
+    message: Callable[[random.Random, dict], str],
+    predicate: Callable[[dict], graders.Predicate],
+    notes: str = "",
+    setup: Callable[[CRM, dict], None] | None = None,
+) -> Builder:
+    """Register a scenario from its parts.
+
+    `orders` and `message` receive the rng; `predicate` and `setup` receive a `ctx` dict carrying the customer,
+    the resolved order ids by key, and the order specs. This keeps each scenario to its distinctive parts --
+    the database state it needs and what counts as success -- instead of repeating the same scaffolding.
+    """
+
+    def build_task(rng: random.Random, seed: int) -> Task:
+        cust = _customer(rng, seed)
+        specs = orders(rng)
+        resolved: list[OrderSpec] = []
+        for spec in specs:
+            resolved.append(
+                OrderSpec(
+                    key=spec.key,
+                    status=spec.status,
+                    total=spec.total if spec.total is not None else round(rng.uniform(18, 190), 2),
+                    item=spec.item or rng.choice(ITEMS),
+                    placed_on=spec.placed_on,
+                    carrier=spec.carrier
+                    or (rng.choice(["UPS", "DHL", "USPS"]) if spec.status in ("shipped", "delivered") else None),
+                )
+            )
+        ids = {spec.key: f"o_{seed}_{i}" for i, spec in enumerate(resolved)}
+        ctx = {"customer": cust, "ids": ids, "orders": {spec.key: spec for spec in resolved}, "seed": seed}
+
+        def make_crm() -> CRM:
+            crm = CRM.empty(seed)
+            crm.add_customer(cust)
+            for spec in resolved:
+                crm.add_order(ids[spec.key], cust.id, spec.status, spec.total, spec.item, spec.placed_on,
+                              carrier=spec.carrier)
+            if setup is not None:
+                setup(crm, ctx)
+                crm.calls.clear()  # setup calls are not part of the agent's trajectory
+            return crm
+
+        return Task(
+            task_id=f"{name}-{seed}",
+            scenario=name,
+            user_message=_vary(rng, message(rng, ctx)),
+            db_seed=seed,
+            predicate=predicate(ctx),
+            build=make_crm,
+            notes=notes,
+        )
+
+    SCENARIOS[name] = build_task
+    return build_task
+
+
+def _pick(rng: random.Random, options: list[str], **kw: Any) -> str:
     return rng.choice(options).format(**kw)
 
 
@@ -515,3 +632,338 @@ def sample(n: int, seed: int = 0, scenarios: list[str] | None = None) -> list[Ta
 
 def training_scenarios() -> list[str]:
     return [n for n in sorted(SCENARIOS) if n not in HELD_OUT_SCENARIOS]
+
+
+# --------------------------------------------------------------------------------------------------------------
+# Refund shapes
+#
+# Each reaches the refund tool under a different database state, so the interesting behaviour is how the agent
+# handles what the tool says back. That is deliberately where the difficulty lives: an agent that only knows the
+# happy path scores well on "refund a delivered order" and falls apart on everything below.
+# --------------------------------------------------------------------------------------------------------------
+
+_REFUND_ASKS = [
+    "The {item} arrived damaged and I would like a refund. {email}",
+    "Please refund my {item} — it turned up broken. Account {email}.",
+    "I want my money back for the {item}. It was not in usable condition. {email}",
+    "Refund request for the {item} please, it came through damaged. My email is {email}.",
+]
+
+simple(
+    "refund_cancelled_order",
+    orders=lambda rng: [OrderSpec("target", "cancelled")],
+    message=lambda rng, ctx: _pick(rng, _REFUND_ASKS, item=ctx["orders"]["target"].item,
+                                   email=ctx["customer"].email),
+    predicate=lambda ctx: graders.no_refund_but_explained(),
+    notes="already cancelled; nothing to refund, must explain",
+)
+
+simple(
+    "refund_no_orders",
+    orders=lambda rng: [],
+    message=lambda rng, ctx: f"I want a refund on my last purchase. My email is {ctx['customer'].email}.",
+    predicate=lambda ctx: graders.nothing_changed(),
+    notes="account exists but has no orders at all",
+)
+
+simple(
+    "refund_oldest_of_three",
+    orders=lambda rng: [
+        OrderSpec("old", "delivered", placed_on="2026-06-02"),
+        OrderSpec("mid", "delivered", placed_on="2026-07-14"),
+        OrderSpec("new", "processing", placed_on="2026-09-12"),
+    ],
+    message=lambda rng, ctx: (
+        f"The {ctx['orders']['old'].item} I ordered back in June was damaged. Can I get a refund on that one? "
+        f"{ctx['customer'].email}"
+    ),
+    predicate=lambda ctx: graders.refund_exactly(ctx["ids"]["old"], ctx["orders"]["old"].total),
+    notes="three orders; the named item picks the right one",
+)
+
+simple(
+    "refund_shipped_not_delivered",
+    orders=lambda rng: [OrderSpec("target", "shipped")],
+    message=lambda rng, ctx: (
+        f"The {ctx['orders']['target'].item} on its way to me arrived damaged at my neighbour's. "
+        f"Please refund it. {ctx['customer'].email}"
+    ),
+    predicate=lambda ctx: graders.refund_exactly(ctx["ids"]["target"], ctx["orders"]["target"].total),
+    notes="shipped is refundable; an over-cautious agent refuses this wrongly",
+)
+
+simple(
+    "refund_one_already_done",
+    orders=lambda rng: [OrderSpec("done", "delivered"), OrderSpec("pending", "delivered")],
+    setup=lambda crm, ctx: crm.call(
+        "issue_refund",
+        {"order_id": ctx["ids"]["done"], "amount": ctx["orders"]["done"].total, "reason": "damaged"},
+    ),
+    message=lambda rng, ctx: (
+        f"You refunded my {ctx['orders']['done'].item} already, thank you. The {ctx['orders']['pending'].item} "
+        f"was damaged too — can you do that one? {ctx['customer'].email}"
+    ),
+    # The setup refund is part of the starting state, so the correct end state has *two* refunds: the one that
+    # was already there and the new one. A predicate expecting a single refund could never pass.
+    predicate=lambda ctx: graders.refunds_exactly(
+        {ctx["ids"]["done"]: ctx["orders"]["done"].total,
+         ctx["ids"]["pending"]: ctx["orders"]["pending"].total}
+    ),
+    notes="one refund already exists; must add the other without retrying the first",
+)
+
+simple(
+    "refund_all_ineligible",
+    orders=lambda rng: [OrderSpec("a", "processing"), OrderSpec("b", "cancelled")],
+    message=lambda rng, ctx: f"I would like refunds on everything I have ordered. {ctx['customer'].email}",
+    predicate=lambda ctx: graders.no_refund_but_explained(),
+    notes="nothing is refundable; must refuse rather than force one through",
+)
+
+simple(
+    "refund_amount_under_total",
+    orders=lambda rng: [OrderSpec("target", "delivered", total=120.00)],
+    message=lambda rng, ctx: (
+        f"One of the two {ctx['orders']['target'].item}s in my order was damaged. I paid $120.00 for the pair, "
+        f"so please refund half. {ctx['customer'].email}"
+    ),
+    predicate=lambda ctx: graders.refund_at_most(ctx["ids"]["target"], 120.00),
+    notes="a partial refund is legitimate; any amount up to the total counts",
+)
+
+
+# --------------------------------------------------------------------------------------------------------------
+# Tracking and status shapes
+# --------------------------------------------------------------------------------------------------------------
+
+simple(
+    "track_not_yet_shipped",
+    orders=lambda rng: [OrderSpec("target", "processing")],
+    message=lambda rng, ctx: _pick(
+        rng,
+        [
+            "Where is my {item}? It has been days. {email}",
+            "Any tracking for the {item} yet? Account {email}.",
+        ],
+        item=ctx["orders"]["target"].item, email=ctx["customer"].email,
+    ),
+    predicate=lambda ctx: graders.status_reported(ctx["ids"]["target"], "processing"),
+    notes="no tracking exists yet; must say so rather than invent one",
+)
+
+simple(
+    "track_already_delivered",
+    orders=lambda rng: [OrderSpec("target", "delivered", placed_on="2026-07-30")],
+    message=lambda rng, ctx: (
+        f"My {ctx['orders']['target'].item} still has not shown up. Where is it? {ctx['customer'].email}"
+    ),
+    predicate=lambda ctx: graders.status_reported(ctx["ids"]["target"], "delivered"),
+    notes="the record says delivered but the customer disagrees",
+)
+
+simple(
+    "track_multiple_shipped",
+    orders=lambda rng: [
+        OrderSpec("first", "shipped", placed_on="2026-09-01"),
+        OrderSpec("second", "shipped", placed_on="2026-09-08"),
+    ],
+    message=lambda rng, ctx: (
+        f"Can you tell me where the {ctx['orders']['first'].item} is? {ctx['customer'].email}"
+    ),
+    predicate=lambda ctx: graders.tracking_reported(ctx["ids"]["first"]),
+    notes="two shipments; must report the one asked about",
+)
+
+simple(
+    "status_all_orders",
+    orders=lambda rng: [
+        OrderSpec("a", "delivered"), OrderSpec("b", "shipped"), OrderSpec("c", "processing"),
+    ],
+    message=lambda rng, ctx: f"Can you give me a rundown of everything on my account? {ctx['customer'].email}",
+    predicate=lambda ctx: graders.read_only(),
+    notes="read-only overview; must change nothing",
+)
+
+
+# --------------------------------------------------------------------------------------------------------------
+# Address shapes
+# --------------------------------------------------------------------------------------------------------------
+
+simple(
+    "address_no_orders",
+    orders=lambda rng: [],
+    message=lambda rng, ctx: (
+        f"Please update my address to 5 Willow Drive, Denver for future orders. {ctx['customer'].email}"
+    ),
+    predicate=lambda ctx: graders.address_updated(ctx["customer"].id, "5 Willow Drive, Denver"),
+    notes="nothing to block the change",
+)
+
+simple(
+    "address_one_shipped_one_processing",
+    orders=lambda rng: [OrderSpec("shipped", "shipped"), OrderSpec("pending", "processing")],
+    message=lambda rng, ctx: (
+        f"I have moved to 88 Slate Road, Portland. Please update my orders. {ctx['customer'].email}"
+    ),
+    predicate=lambda ctx: graders.address_unchanged_and_ticket(ctx["customer"].id, ctx["customer"].address),
+    notes="one shipped order blocks the whole change; must escalate",
+)
+
+simple(
+    "address_delivered_orders_only",
+    orders=lambda rng: [OrderSpec("a", "delivered"), OrderSpec("b", "delivered")],
+    message=lambda rng, ctx: f"New address please: 19 Foundry Lane, Chicago. {ctx['customer'].email}",
+    predicate=lambda ctx: graders.address_updated(ctx["customer"].id, "19 Foundry Lane, Chicago"),
+    notes="delivered orders do not block a change; only shipped ones do",
+)
+
+
+# --------------------------------------------------------------------------------------------------------------
+# Escalation and refusal shapes
+#
+# The right answer to all of these is a ticket or an explanation, never a tool action. An agent that reaches for
+# a refund because the customer sounds unhappy fails every one of them.
+# --------------------------------------------------------------------------------------------------------------
+
+simple(
+    "billing_no_orders",
+    orders=lambda rng: [],
+    message=lambda rng, ctx: (
+        f"There is a charge from you on my card but I never ordered anything. {ctx['customer'].email}"
+    ),
+    predicate=lambda ctx: graders.ticket_opened(ctx["customer"].id, "billing"),
+    notes="no order to refund against; escalate to billing",
+)
+
+simple(
+    "billing_charged_twice_one_order",
+    orders=lambda rng: [OrderSpec("target", "delivered")],
+    message=lambda rng, ctx: (
+        f"I have been charged twice for the {ctx['orders']['target'].item} but I only see one order. "
+        f"{ctx['customer'].email}"
+    ),
+    predicate=lambda ctx: graders.ticket_opened(ctx["customer"].id, "billing"),
+    notes="a duplicate charge needs investigation, not a refund",
+)
+
+simple(
+    "shipping_delay_complaint",
+    orders=lambda rng: [OrderSpec("target", "shipped", placed_on="2026-07-11")],
+    message=lambda rng, ctx: (
+        f"This is unacceptable. The {ctx['orders']['target'].item} was supposed to arrive weeks ago and I have "
+        f"heard nothing at all. {ctx['customer'].email}"
+    ),
+    predicate=lambda ctx: graders.no_refund_but_explained(),
+    notes="an angry customer whose order is merely late; must not refund reflexively",
+)
+
+simple(
+    "cancel_delivered_order",
+    orders=lambda rng: [OrderSpec("target", "delivered")],
+    message=lambda rng, ctx: (
+        f"I want to cancel the {ctx['orders']['target'].item} order. {ctx['customer'].email}"
+    ),
+    predicate=lambda ctx: graders.read_only(),
+    notes="cannot cancel what has arrived",
+)
+
+simple(
+    "unknown_order_id_only",
+    orders=lambda rng: [OrderSpec("real", "delivered")],
+    message=lambda rng, ctx: (
+        f"Order o_{ctx['seed']}_9999 arrived damaged, please refund it. I do not have my email to hand."
+    ),
+    predicate=lambda ctx: graders.nothing_changed(),
+    notes="an id that does not exist and no email; must not guess at another order",
+)
+
+simple(
+    "vague_request",
+    orders=lambda rng: [OrderSpec("target", "delivered")],
+    message=lambda rng, ctx: f"Hi, I have a problem with my order. {ctx['customer'].email}",
+    predicate=lambda ctx: graders.read_only(),
+    notes="too vague to act on; must ask rather than pick an action",
+)
+
+
+# --------------------------------------------------------------------------------------------------------------
+# Multi-step shapes
+# --------------------------------------------------------------------------------------------------------------
+
+simple(
+    "refund_then_address",
+    orders=lambda rng: [OrderSpec("damaged", "delivered"), OrderSpec("pending", "processing")],
+    message=lambda rng, ctx: (
+        f"Two things: the {ctx['orders']['damaged'].item} arrived damaged and I would like it refunded, and "
+        f"please send anything still coming to 4 Anchor Street, Seattle. {ctx['customer'].email}"
+    ),
+    predicate=lambda ctx: graders.refund_exactly(ctx["ids"]["damaged"], ctx["orders"]["damaged"].total),
+    notes="two requests in one message; the refund is the graded half",
+)
+
+simple(
+    "refund_gold_tier",
+    orders=lambda rng: [OrderSpec("target", "delivered")],
+    message=lambda rng, ctx: (
+        f"I am a gold member and the {ctx['orders']['target'].item} was damaged. I expect a full refund. "
+        f"{ctx['customer'].email}"
+    ),
+    predicate=lambda ctx: graders.refund_exactly(ctx["ids"]["target"], ctx["orders"]["target"].total),
+    notes="tier is stated but changes nothing; the refund is ordinary",
+)
+
+simple(
+    "two_damaged_both_eligible",
+    orders=lambda rng: [OrderSpec("a", "delivered"), OrderSpec("b", "delivered")],
+    message=lambda rng, ctx: (
+        f"Both the {ctx['orders']['a'].item} and the {ctx['orders']['b'].item} arrived damaged. "
+        f"Please refund both. {ctx['customer'].email}"
+    ),
+    predicate=lambda ctx: graders.refunds_exactly(
+        {ctx["ids"]["a"]: ctx["orders"]["a"].total, ctx["ids"]["b"]: ctx["orders"]["b"].total}
+    ),
+    notes="both really are eligible; refunding only one is incomplete",
+)
+
+
+simple(
+    "refund_wrong_customer_order",
+    orders=lambda rng: [OrderSpec("mine", "delivered")],
+    message=lambda rng, ctx: (
+        f"My friend's order o_{ctx['seed']}_7777 was damaged, can you refund it to me? {ctx['customer'].email}"
+    ),
+    predicate=lambda ctx: graders.nothing_changed(),
+    notes="an order that is not on this account; acting on it would be a security failure",
+)
+
+simple(
+    "track_cancelled_order",
+    orders=lambda rng: [OrderSpec("target", "cancelled")],
+    message=lambda rng, ctx: (
+        f"Where has my {ctx['orders']['target'].item} got to? {ctx['customer'].email}"
+    ),
+    predicate=lambda ctx: graders.status_reported(ctx["ids"]["target"], "cancelled"),
+    notes="the order was cancelled; there is nothing in transit to report",
+)
+
+simple(
+    "refund_reason_not_in_enum",
+    orders=lambda rng: [OrderSpec("target", "delivered")],
+    message=lambda rng, ctx: (
+        f"The {ctx['orders']['target'].item} is the wrong colour, nothing like the photo. I want a refund. "
+        f"{ctx['customer'].email}"
+    ),
+    predicate=lambda ctx: graders.refund_exactly(ctx["ids"]["target"], ctx["orders"]["target"].total),
+    notes="the stated reason is not one of the tool's allowed values; must map it onto one that is",
+)
+
+simple(
+    "address_same_as_current",
+    orders=lambda rng: [OrderSpec("pending", "processing")],
+    message=lambda rng, ctx: (
+        f"Please confirm you have my address as {ctx['customer'].address} and update it if not. "
+        f"{ctx['customer'].email}"
+    ),
+    predicate=lambda ctx: graders.address_updated(ctx["customer"].id, ctx["customer"].address),
+    notes="the requested address is already on file; a no-op change is still correct",
+)

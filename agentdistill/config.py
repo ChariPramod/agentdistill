@@ -242,6 +242,8 @@ class GraderConfig(StrictModel):
 
 class EvalConfig(StrictModel):
     eval_set: str | None = None
+    #: Where the judge model is served, for grader.type == "llm_judge".
+    judge_base_url: str = "https://api.openai.com/v1"
     n_per_task: int = Field(5, ge=1)
     policy: Literal["strict", "fuzzy"] = "strict"
     grader: GraderConfig = Field(default_factory=GraderConfig)

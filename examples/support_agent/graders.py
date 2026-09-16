@@ -76,6 +76,72 @@ def refund_exactly(order_id: str, amount: float, *, require_amount_in_reply: boo
     return predicate
 
 
+def refund_at_most(order_id: str, ceiling: float) -> Predicate:
+    """A partial refund is legitimate: any positive amount up to the order total counts.
+
+    Used where the customer asks for part of an order back. Pinning an exact figure would grade the agent on
+    guessing a number the task does not determine.
+    """
+
+    def predicate(crm: Any, final_text: str) -> tuple[bool, str]:
+        refunds = crm.refunds()
+        if not refunds:
+            return False, "no refund was issued"
+        if len(refunds) > 1:
+            return False, f"{len(refunds)} refunds issued; expected exactly one"
+        r = refunds[0]
+        if r["order_id"] != order_id:
+            return False, f"refunded {r['order_id']}, expected {order_id}"
+        if not (0 < r["amount"] <= round(ceiling, 2) + 1e-9):
+            return False, f"refunded {r['amount']}, which is outside (0, {ceiling}]"
+        if not _money_mentioned(final_text, r["amount"]):
+            return False, f"refund is correct but the reply never states the amount {r['amount']:.2f}"
+        return True, f"partial refund of {r['amount']:.2f} within the order total"
+
+    return predicate
+
+
+def refunds_exactly(expected: dict[str, float]) -> Predicate:
+    """Exactly this set of orders refunded, each for its own amount.
+
+    For tasks where more than one refund is genuinely correct; refunding only one of them is incomplete, not a
+    conservative success.
+    """
+
+    def predicate(crm: Any, final_text: str) -> tuple[bool, str]:
+        got = {r["order_id"]: round(r["amount"], 2) for r in crm.refunds()}
+        want = {k: round(v, 2) for k, v in expected.items()}
+        missing = sorted(set(want) - set(got))
+        extra = sorted(set(got) - set(want))
+        if missing:
+            return False, f"did not refund {missing}"
+        if extra:
+            return False, f"refunded {extra}, which was not asked for"
+        wrong = [k for k in want if got[k] != want[k]]
+        if wrong:
+            return False, f"wrong amount on {wrong}: got {[got[k] for k in wrong]}, expected {[want[k] for k in wrong]}"
+        return True, f"refunded {len(want)} orders correctly"
+
+    return predicate
+
+
+def read_only() -> Predicate:
+    """No state change of any kind. The right answer was to look, or to ask.
+
+    Distinct from `nothing_changed`, which also demands a reply: some read-only tasks are graded purely on
+    restraint.
+    """
+
+    def predicate(crm: Any, final_text: str) -> tuple[bool, str]:
+        if crm.refunds():
+            return False, "a refund was issued on a request that called for none"
+        if crm.tickets():
+            return False, "a ticket was opened on a request that called for none"
+        return True, "no state change, as expected"
+
+    return predicate
+
+
 def no_refund_but_explained(*, must_mention: tuple[str, ...] = ()) -> Predicate:
     """The correct answer is to refuse. No refund may exist, and the reply must explain why."""
 

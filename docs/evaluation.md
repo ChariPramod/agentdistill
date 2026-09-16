@@ -67,7 +67,7 @@ on it must carry that caveat.
 |---|---|
 | `predicate` / `replay_predicate` | a pure function of the reconstructed end state plus the final message. No model in the loop. The strongest option |
 | `label` | exact final-text match against the recording. Weak, and the report says so |
-| `llm_judge` | not built yet |
+| `llm_judge` | a judge model against a rubric. Never reported as a bare number — see below |
 
 The replay predicate rebuilds a fresh environment from the task's seed and applies the student's own tool calls to
 it. Because results were served from the recording, a student that made the same calls reaches the same state; a
@@ -76,6 +76,36 @@ student that made different calls is graded on what its own calls produced, whic
 `tests/test_eval_runner.py::test_replay_predicate_matches_live` asserts the reconstruction reproduces the label
 recorded live, across the whole example corpus. It has already caught one real bug: tracking numbers built from
 Python's per-process-randomized `hash()`, which made every rebuilt state differ from the recording.
+
+### Judge grading
+
+A judge is a measuring instrument with its own error rate, and that rate is rarely symmetric: most judges call a
+mediocre trajectory a success far more readily than they call a good one a failure. A raw judge score therefore
+carries a bias that propagates into everything downstream.
+
+So a judge number never appears alone. Calibrate against trusted labels on the same tasks:
+
+```bash
+agentdistill eval run student --eval-set holdout          # graded by the judge
+agentdistill eval run student --eval-set holdout-labelled # graded by predicate or human labels
+agentdistill eval calibrate-judge <judge-run> <truth-run>
+```
+
+That prints, and stores, the judge's agreement, false-positive and false-negative rates, its bias, and a
+Rogan-Gladen corrected estimate:
+
+```
+judge success 75.0%  (corrected 63.5%; agreement 88.5% on n=200, false-positive 31.5%,
+                      false-negative 0.0%, bias +11.5%)
+```
+
+Two refusals are deliberate. Below 30 labelled items no correction is applied, because it would be noise
+presented as precision. And if the judge is near-random (sensitivity + specificity ≤ 1) the correction is
+undefined and says so rather than producing a number. With no calibration at all, the line reads `UNCALIBRATED`
+and states that the score should not be compared against anything.
+
+A judge that returns unparseable output is recorded as `judge_error`, not as a task failure — failing closed
+would bias the score downward and hide that the instrument broke.
 
 ## Comparing
 

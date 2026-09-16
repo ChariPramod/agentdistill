@@ -629,7 +629,19 @@ def _resolve_grader(cfg: Any):
             raise typer.Exit(code=1) from e
         return getattr(module, attr)
     if kind == "llm_judge":
-        _not_built("the LLM judge grader", "milestone 3 stretch; predicates are the supported grader today")
+        from agentdistill.eval.calibration import make_llm_judge
+
+        grader_cfg = cfg.eval.grader
+        rubric_path = cfg.resolve(grader_cfg.rubric) if grader_cfg.rubric else None
+        if rubric_path is None or not rubric_path.exists():
+            err.print(f"[red]eval.grader.rubric is required for llm_judge and was not found[/red]: {rubric_path}")
+            raise typer.Exit(code=1)
+        judge_client = _resolve_client(f"http:{grader_cfg.judge_model}@{cfg.eval.judge_base_url}", cfg, "http")
+        console.print(
+            "[yellow]judge grading:[/yellow] results will be reported with the judge's agreement and error "
+            "rates, never as a bare number. Calibrate with `agentdistill judge calibrate`."
+        )
+        return make_llm_judge(judge_client, rubric_path.read_text(), grader_cfg.judge_model or "")
     return label_grader
 
 
@@ -826,6 +838,50 @@ def eval_compare(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(render_run_markdown(a, result))
         console.print(f"\n[green]wrote[/green] {path}")
+
+
+@eval_app.command("calibrate-judge")
+def eval_calibrate_judge(
+    judge_run: str = typer.Argument(..., help="An eval run graded by the judge."),
+    truth_run: str = typer.Argument(..., help="The same tasks graded by a predicate or human labels."),
+    out: str | None = typer.Option(None, help="Where to write the calibration JSON."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Measure a judge against trusted labels on the same tasks.
+
+    A judge is a measuring instrument with its own error rate, and it is usually asymmetric: most judges call a
+    mediocre trajectory a success far more readily than they call a good one a failure. Without this, that bias
+    sits inside every number the judge produces.
+    """
+    from agentdistill.eval.calibration import MIN_CALIBRATION_ITEMS, calibrate_judge, report_line
+
+    cfg = _load(config)
+    reg = _registry(cfg)
+    a, b = reg.find_eval_run(judge_run), reg.find_eval_run(truth_run)
+    if a is None or b is None:
+        err.print("[red]could not resolve both runs[/red]; try `agentdistill eval list`.")
+        raise typer.Exit(code=1)
+
+    judged = {(r["task_id"], r["repeat_idx"]): bool(r["success"]) for r in reg.eval_results(a["id"])}
+    truth = {(r["task_id"], r["repeat_idx"]): bool(r["success"]) for r in reg.eval_results(b["id"])}
+    shared = sorted(set(judged) & set(truth))
+    if not shared:
+        err.print("[red]the two runs share no task/repeat pairs[/red]; they must cover the same items.")
+        raise typer.Exit(code=1)
+
+    cal = calibrate_judge(
+        [judged[k] for k in shared], [truth[k] for k in shared],
+        judge_model=cfg.eval.grader.judge_model or "", rubric=cfg.eval.grader.rubric or "",
+    )
+    console.print(report_line(cal.judge_positive_rate, cal))
+    if not cal.usable:
+        console.print(
+            f"[yellow]only {cal.n} labelled items; {MIN_CALIBRATION_ITEMS} are needed before a correction is "
+            f"anything but noise.[/yellow]"
+        )
+    path = Path(out) if out else cfg.artifacts_dir / "calibration" / f"judge-{a['id'][:10]}.json"
+    cal.save(path)
+    console.print(f"[green]wrote[/green] {path}")
 
 
 @eval_app.command("list")

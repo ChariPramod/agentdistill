@@ -9,8 +9,8 @@ What is built, what is measured, and every place the code deliberately differs f
 | M1 — ingest, curate, dataset | **done** |
 | M2 — SFT | **code complete, unmeasured.** No GPU run; no throughput or next-action number exists. |
 | M2.5 — example agent | **built and tested.** Corpus recorded from a scripted solver, not a teacher. |
-| M3 — eval harness | **done.** Control test passes; `eval run` / `compare` / `show` work end to end. |
-| M4 — on-policy | bridge built (`eval/rollouts.py`); the round loop is not |
+| M3 — eval harness | **done.** Control test passes; `eval run` / `compare` / `show` work end to end. Judge grading is calibrated. |
+| M4 — on-policy | bridge built (`eval/rollouts.py`); the round loop and DPO trainer are not |
 | M5–M8 | not started; those commands exit 2 naming their milestone |
 
 **The sentence this phase exists to produce is still not true.** It requires a student, and a student requires a
@@ -103,15 +103,16 @@ eval number involving a tracking number.
 
 ## Where the example corpus falls short of the plan
 
-The next-phase plan asks for 40 scenarios × 10 instances = 400 tasks recorded from a real teacher. What exists is
-13 scenario shapes × 20 instances = 260 tasks recorded from a rule-based solver.
+The plan asks for 40 scenarios × 10 instances recorded from a real teacher. What exists is **40 scenario shapes ×
+15 instances = 600 tasks**, recorded from a rule-based solver.
 
-- **13 shapes, not 40.** Each shape carries a real wrinkle (ineligible orders, wrong ids, two orders where only
-  one qualifies, requests whose right answer is to refuse). More shapes would improve cluster diversity and the
-  generalization measurement; these were chosen over 40 shallow ones.
+- **The shape count and volume now meet the plan.** 40 shapes, 600 tasks, 408 training traces, 296 kept after
+  curation (the plan's bar was 250), and two frozen eval sets. Solver success is 84%, inside the plan's 60–90%
+  band.
 - **A scripted solver, not a teacher.** `scripted_teacher.py` reacts to real tool results from a real stateful
   database, so trajectories have the right shape — but it is a generator, and the plan is right that a student
   would learn the generator. These traces are for exercising the pipeline. **They must not be trained on or used
   to publish a number.**
-- **Error injection is uneven.** It perturbs refund actions only, so read-only scenarios sit at 100% and the
-  recorder correctly flags them as unable to separate a student from the teacher.
+- **A handful of scenarios still sit at 100%.** Error injection now covers every intent rather than refunds
+  alone, but the "refuse and explain" shapes have no wrong action to inject. The recorder flags them, honestly,
+  as unable to separate a student from the teacher.

@@ -273,7 +273,7 @@ def test_held_out_scenarios_are_real_and_excluded():
 
 
 def test_sample_spreads_across_scenarios():
-    tasks = scenarios.sample(26, seed=1)
+    tasks = scenarios.sample(2 * len(scenarios.SCENARIOS), seed=1)
     counts: dict[str, int] = {}
     for t in tasks:
         counts[t.scenario] = counts.get(t.scenario, 0) + 1
