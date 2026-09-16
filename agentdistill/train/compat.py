@@ -225,3 +225,89 @@ def _set_renamed(want: dict[str, Any], fields: set[str], logical: str, value: An
         f"SFTConfig has none of {RENAMED[logical]} for {logical!r}. "
         f"Update RENAMED in agentdistill/train/compat.py for this TRL version."
     )
+
+
+# --------------------------------------------------------------------------------------------------------------
+# DPO
+# --------------------------------------------------------------------------------------------------------------
+
+
+def dpo_config_fields() -> set[str]:
+    from trl import DPOConfig
+
+    fields = {f.name for f in dataclasses.fields(DPOConfig)}
+    try:
+        import inspect
+
+        fields |= set(inspect.signature(DPOConfig.__init__).parameters)
+    except (TypeError, ValueError):  # pragma: no cover
+        pass
+    fields.discard("self")
+    fields.discard("kwargs")
+    return fields
+
+
+def dpo_config_kwargs(cfg: dict[str, Any], out_dir: str, total_steps: int | None = None) -> dict[str, Any]:
+    """Build kwargs for the installed `DPOConfig`, same contract as `sft_config_kwargs`."""
+    fields = dpo_config_fields()
+    want: dict[str, Any] = {
+        "output_dir": out_dir,
+        "beta": cfg.get("dpo_beta", 0.1),
+        "num_train_epochs": cfg.get("dpo_epochs", 1),
+        # 5e-6, not the SFT rate: DPO on a merged bf16 model diverges at 1e-4 and the loss goes NaN in the first
+        # few steps.
+        "learning_rate": cfg.get("dpo_lr", 5e-6),
+        "per_device_train_batch_size": cfg.get("dpo_per_device_batch", 1),
+        "gradient_accumulation_steps": cfg.get("dpo_grad_accum", 16),
+        "bf16": cfg.get("bf16", True),
+        "gradient_checkpointing": cfg.get("gradient_checkpointing", True),
+        "logging_steps": cfg.get("logging_steps", 10),
+        "seed": cfg.get("seed", 17),
+        "report_to": resolve_report_to(cfg.get("report_to", ["tensorboard"])),
+        "loss_type": cfg.get("dpo_loss_type", "sigmoid"),
+        "max_grad_norm": cfg.get("max_grad_norm", 1.0),
+        "remove_unused_columns": False,
+        "max_steps": cfg.get("max_steps", -1),
+    }
+    max_seq_len = cfg.get("max_seq_len", 8192)
+    _set_first_available(want, fields, ("max_length", "max_seq_length"), max_seq_len, "sequence length")
+    _set_first_available(
+        want, fields, ("max_prompt_length",), max(256, max_seq_len - 512), "prompt length", required=False
+    )
+    _set_warmup(want, fields, cfg, total_steps)
+
+    unknown = sorted(k for k in want if k not in fields)
+    tolerable = [k for k in unknown if k in DPO_OPTIONAL]
+    fatal = [k for k in unknown if k not in DPO_OPTIONAL]
+    for k in tolerable:
+        logger.warning("DPOConfig has no %r (%s); dropped from this run", k, DPO_OPTIONAL[k])
+        want.pop(k)
+    if fatal:
+        raise CompatError(
+            f"DPOConfig in the installed TRL lacks required fields {fatal}. "
+            f"Update agentdistill/train/compat.py for this TRL version."
+        )
+    return want
+
+
+#: DPO fields whose absence changes the run but does not invalidate it.
+DPO_OPTIONAL: dict[str, str] = {
+    "loss_type": "this TRL has one DPO loss; the default is sigmoid anyway",
+    "max_prompt_length": "prompts will not be truncated separately from completions",
+    "max_grad_norm": "gradient clipping is unavailable; watch for NaN loss in the first steps",
+    "remove_unused_columns": "extra dataset columns may be forwarded to the model",
+}
+
+
+def _set_first_available(
+    want: dict[str, Any], fields: set[str], candidates: tuple[str, ...], value: Any, what: str,
+    required: bool = True,
+) -> None:
+    for candidate in candidates:
+        if candidate in fields:
+            want[candidate] = value
+            return
+    if required:
+        raise CompatError(
+            f"DPOConfig has none of {candidates} for {what}. Update agentdistill/train/compat.py."
+        )
