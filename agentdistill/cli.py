@@ -152,9 +152,32 @@ def ingest_otel(path: str, config: str = "project.yaml") -> None:
 
 
 @ingest_app.command("gateway")
-def ingest_gateway(since: str = "7d", config: str = "project.yaml") -> None:
-    """Import gateway requests that have outcomes."""
-    _not_built("gateway ingest", "needs the gateway, which lands in milestone 6")
+def ingest_gateway(
+    since: str = typer.Option("7d", help="Only requests received within this window."),
+    require_outcome: bool = typer.Option(True, help="Skip requests nobody graded."),
+    limit: int | None = typer.Option(None),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Import served requests that have outcomes. This is the retrain loop's source."""
+    from agentdistill.ingest.gateway_source import load_traces, summarize
+
+    cfg = _load(config)
+    reg = _registry(cfg)
+
+    stats = summarize(reg, since=since)
+    console.print(
+        f"request log ({since}): {stats['requests']} requests, {stats['graded']} graded "
+        f"({stats['successful']} successful), {stats['escalated']} escalated"
+    )
+    if stats["requests"] and not stats["graded"]:
+        console.print(
+            "[yellow]nothing is graded[/yellow]. Outcomes arrive through POST /v1/feedback; without them the "
+            "log records what was served but not whether it worked, and nothing here can be trained on."
+        )
+
+    traces, problems = load_traces(reg, since=since, require_outcome=require_outcome, limit=limit)
+    counts = reg.insert_traces(traces)
+    _report_ingest("gateway", counts, problems)
 
 
 @app.command()
@@ -1340,15 +1363,103 @@ def adapter_quantize(adapter: str, method: str = "fp8") -> None:
 
 
 @adapter_app.command("promote")
-def adapter_promote(adapter: str, to: str = "canary") -> None:
-    """Move an adapter to canary or prod after checks."""
-    _not_built("adapter promote", "milestone 7")
+def adapter_promote(
+    adapter: str = typer.Argument(..., help="Adapter id or name."),
+    to: str = typer.Option("canary", help="canary, prod, or retired."),
+    force: bool = typer.Option(False, help="Promote despite failing checks. The event records that you did."),
+    actor: str = typer.Option("cli", help="Who is promoting, recorded on the event."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Move an adapter through its lifecycle, gated on measured evidence.
+
+    Prints the checks and refuses unless every one is green. Months from now, `adapter lineage` answers "why is
+    this adapter in prod" with the comparison that justified it.
+    """
+    from agentdistill.registry.lifecycle import IllegalTransition, transition
+
+    cfg = _load(config)
+    reg = _registry(cfg)
+    try:
+        result = transition(reg, adapter, to, cfg, actor=actor, force=force)
+    except (LookupError, IllegalTransition) as e:
+        err.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+
+    table = Table(box=None, title=f"{adapter}: {result.from_status} -> {to}")
+    table.add_column("check")
+    table.add_column("", justify="center")
+    table.add_column("detail", overflow="fold")
+    for name, check in result.checks.items():
+        value = f"  [dim]({check.value})[/dim]" if check.value is not None else ""
+        table.add_row(name, "[green]PASS[/green]" if check.ok else "[red]FAIL[/red]", check.detail + value)
+    console.print(table)
+
+    if not result.ok:
+        console.print(f"\n[red]not promoted[/red]: {', '.join(result.failed)} failed.")
+        console.print("Fix the failing checks, or pass --force to override and have that recorded.")
+        raise typer.Exit(code=1)
+    if result.forced:
+        console.print(f"\n[yellow]forced[/yellow] to {to} despite {', '.join(result.failed)}.")
+    else:
+        console.print(f"\n[green]promoted[/green] to {to}.")
 
 
 @adapter_app.command("lineage")
-def adapter_lineage(adapter: str) -> None:
-    """Print dataset, config, and parent chain."""
-    _not_built("adapter lineage", "milestone 7")
+def adapter_lineage(
+    adapter: str = typer.Argument(..., help="Adapter id or name."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Print an adapter's provenance: dataset, training run, parents, and every status change."""
+    from agentdistill.registry.lifecycle import adapter as get_adapter
+    from agentdistill.registry.lifecycle import events
+
+    cfg = _load(config)
+    reg = _registry(cfg)
+    try:
+        row = get_adapter(reg, adapter)
+    except LookupError as e:
+        err.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+
+    console.print(f"[bold]{row['name']} v{row['version']}[/bold]  ({row['id']})")
+    console.print(f"  status       {row['status']}" + (f"   tag {row['tag']}" if row.get("tag") else ""))
+    console.print(f"  base model   {row['base_model']}")
+    console.print(f"  path         {row['path']}")
+    if row.get("quantization"):
+        console.print(f"  quantization {row['quantization']}")
+
+    run = reg.get_training_run(row["training_run_id"])
+    if run:
+        console.print(f"  trained by   {run['id']}  ({run['method']}, {run['status']})")
+        dataset = next((d for d in reg.list_datasets() if d["id"] == run["dataset_id"]), None)
+        if dataset:
+            console.print(
+                f"  dataset      {dataset['name']} v{dataset['version']}  "
+                f"{dataset['n_samples']} samples  hash {dataset['content_hash'][:12]}"
+            )
+            if dataset.get("report_path"):
+                console.print(f"  curation     {dataset['report_path']}")
+
+    parent = row.get("parent_adapter_id")
+    while parent:
+        try:
+            prow = get_adapter(reg, parent)
+        except LookupError:
+            break
+        console.print(f"  parent       {prow['name']} v{prow['version']} ({prow['id']})")
+        parent = prow.get("parent_adapter_id")
+
+    history = events(reg, row["id"])
+    if history:
+        console.print("\n  history")
+        for event in history:
+            checks = event["checks"] or {}
+            failed = [k for k, v in (checks.get("checks") or {}).items() if not v.get("ok")]
+            suffix = f"  [yellow]forced past {failed}[/yellow]" if checks.get("forced") else ""
+            console.print(f"    {event['created_at'][:19]}  {event['from_status']} -> {event['to_status']}  "
+                          f"by {event['actor']}{suffix}")
+    else:
+        console.print("\n  [dim]no status changes recorded[/dim]")
 
 
 @app.command()
