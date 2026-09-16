@@ -1,0 +1,89 @@
+[project]
+name = "agentdistill"
+version = "0.1.0"
+description = "Distill your production agent into a small model with a calibrated escalation gate and a cost report."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Pramod" }]
+keywords = ["llm", "distillation", "agents", "lora", "vllm", "calibration"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+  "typer>=0.12",
+  "rich>=13",
+  "pydantic>=2",
+  "pyyaml>=6",
+  "sqlalchemy>=2",
+  "numpy>=1.26",
+  "scipy>=1.12",
+  "scikit-learn>=1.4",
+  "pyarrow>=15",
+  "datasets>=2.19",
+  "datasketch>=1.6",
+  "jsonschema>=4.21",
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+  "httpx>=0.27",
+  "litellm>=1.50",
+  "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+train = ["torch>=2.3", "transformers>=4.44", "trl>=0.12", "peft>=0.12", "bitsandbytes>=0.43", "accelerate>=0.33", "tensorboard"]
+unsloth = ["unsloth"]
+serve = ["vllm>=0.6"]
+postgres = ["psycopg[binary]>=3.1", "pgvector>=0.3"]
+agentreplay = ["agentreplay>=0.1"]
+local-embeddings = ["sentence-transformers>=3"]
+tokenizers = ["transformers>=4.44"]
+dev = ["pytest>=8", "pytest-asyncio", "ruff", "mypy", "hypothesis", "respx", "types-PyYAML"]
+
+[project.scripts]
+agentdistill = "agentdistill.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agentdistill"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF"]
+# B008: Typer declares defaults via function calls, which is its documented style.
+# RUF012: mutable class attributes are pydantic fields, not shared state.
+# RUF001: reports deliberately use typographic characters (×, –, ≥) in human-facing Markdown.
+ignore = ["B008", "RUF012", "RUF001"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+
+[tool.mypy]
+# The package supports 3.11+, but numpy's bundled stubs use `type` statements that mypy only parses at 3.12+.
+# Checking at 3.12 is the closest we can get; CI still runs the test suite on 3.11.
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+warn_unused_ignores = true
+ignore_missing_imports = true
+check_untyped_defs = true
+exclude = ["^build/", "^dist/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+  "gpu: requires a GPU",
+  "slow: slow test, excluded from the fast CI lane",
+  "tokenizer: downloads a tokenizer from the Hub",
+]

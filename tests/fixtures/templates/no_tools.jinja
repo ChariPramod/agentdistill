@@ -1,0 +1,5 @@
+{%- for m in messages -%}
+<|{{ m.role }}|>{{ m.content or '' }}<|end|>
+{%- endfor -%}
+{%- if add_generation_prompt -%}<|assistant|>
+{%- endif -%}

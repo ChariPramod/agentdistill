@@ -1,0 +1,43 @@
+# Example project: a synthetic support agent.
+# Runs end to end with no GPU and no API key:
+#   python generate_traces.py --n 500
+#   agentdistill ingest jsonl traces.jsonl --config project.yaml
+#   agentdistill curate --config project.yaml
+name: support-agent
+registry: sqlite:///.agentdistill/registry.db
+artifacts: ./artifacts
+reports: ./reports
+
+sources:
+  - type: jsonl
+    path: traces.jsonl
+
+curate:
+  filters: [outcome, schema_valid, no_error_loops, length, exact_dedupe, near_dedupe, decontaminate, pii, stratify]
+  near_dedupe_threshold: 0.85
+  min_turns: 2
+  max_turns: 40
+  clusters: 8
+  cap_per_cluster: 120
+  embeddings:
+    provider: hash
+    dim: 128
+
+dataset:
+  max_seq_len: 2048
+  window_turns: 12
+
+train:
+  # The repo's tiny fixture tokenizer, so the example runs offline. Swap for a real 3B-8B instruct model
+  # (check it first with `agentdistill base-check <model>`) before training anything.
+  base_model: ../../tests/fixtures/tokenizer
+  method: sft
+  max_seq_len: 2048
+  epochs: 2
+  lr: 1.0e-4
+  seed: 17
+
+eval:
+  eval_set: support-holdout
+  n_per_task: 5
+  grader: {type: label}

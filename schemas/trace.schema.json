@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/pramod/agentdistill/schemas/trace.schema.json",
+  "title": "agentdistill normalized trace",
+  "description": "One agent trajectory in normalized OpenAI-style message format. Every ingest source converts to this shape so that curation, tokenization, and eval never branch on provider.",
+  "type": "object",
+  "required": ["messages", "tools"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "description": "Stable id; derived from content_hash when absent." },
+    "source": { "type": "string", "enum": ["agentreplay", "otel", "langfuse", "jsonl", "gateway"] },
+    "source_ref": { "type": ["string", "null"], "description": "Run id or file path this trace came from." },
+    "task_id": { "type": ["string", "null"], "description": "Groups repeats of the same task; used for pairing and for held-out splits." },
+    "task_input": {
+      "description": "The task as posed, before any assistant turn. Used for clustering and decontamination.",
+      "type": ["object", "string", "null"]
+    },
+    "messages": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/message" }
+    },
+    "tools": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/tool" }
+    },
+    "teacher_model": { "type": ["string", "null"] },
+    "success": { "type": ["boolean", "null"] },
+    "grader": { "type": ["string", "null"] },
+    "score": { "type": ["number", "null"] },
+    "n_turns": { "type": ["integer", "null"], "minimum": 0 },
+    "n_tool_calls": { "type": ["integer", "null"], "minimum": 0 },
+    "prompt_tokens": { "type": ["integer", "null"], "minimum": 0 },
+    "completion_tokens": { "type": ["integer", "null"], "minimum": 0 },
+    "cost_usd": { "type": ["number", "null"], "minimum": 0 },
+    "content_hash": { "type": ["string", "null"] },
+    "cluster": { "type": ["integer", "null"] },
+    "created_at": { "type": ["string", "null"], "format": "date-time" },
+    "metadata": { "type": ["object", "null"] }
+  },
+  "$defs": {
+    "message": {
+      "type": "object",
+      "required": ["role"],
+      "additionalProperties": false,
+      "properties": {
+        "role": { "type": "string", "enum": ["system", "user", "assistant", "tool"] },
+        "content": { "type": ["string", "null"] },
+        "name": { "type": ["string", "null"] },
+        "tool_calls": {
+          "type": ["array", "null"],
+          "items": { "$ref": "#/$defs/tool_call" }
+        },
+        "tool_call_id": { "type": ["string", "null"], "description": "Required on role=tool; pairs the result with its call." }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "role": { "const": "tool" } }, "required": ["role"] },
+          "then": { "required": ["tool_call_id", "content"] }
+        },
+        {
+          "if": { "properties": { "role": { "enum": ["system", "user"] } }, "required": ["role"] },
+          "then": {
+            "required": ["content"],
+            "properties": { "content": { "type": "string" }, "tool_calls": { "type": "null" } }
+          }
+        }
+      ]
+    },
+    "tool_call": {
+      "type": "object",
+      "required": ["id", "type", "function"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "const": "function" },
+        "function": {
+          "type": "object",
+          "required": ["name", "arguments"],
+          "additionalProperties": false,
+          "properties": {
+            "name": { "type": "string" },
+            "arguments": { "type": "string", "description": "JSON-encoded object, as the OpenAI wire format sends it." }
+          }
+        }
+      }
+    },
+    "tool": {
+      "type": "object",
+      "required": ["type", "function"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "function" },
+        "function": {
+          "type": "object",
+          "required": ["name"],
+          "additionalProperties": false,
+          "properties": {
+            "name": { "type": "string" },
+            "description": { "type": "string" },
+            "parameters": { "type": "object" }
+          }
+        }
+      }
+    }
+  }
+}

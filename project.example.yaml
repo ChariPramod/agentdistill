@@ -1,0 +1,81 @@
+# agentdistill project config. One file drives every stage.
+# Every run is reproducible from this file plus a dataset hash.
+
+name: support-agent
+registry: sqlite:///.agentdistill/registry.db      # or postgresql://user@host/db
+artifacts: ./artifacts
+reports: ./reports
+
+sources:
+  - type: jsonl
+    path: traces.jsonl
+  # - type: agentreplay
+  #   db: .agentreplay/agentreplay.db
+  #   since: 60d
+  # - type: gateway            # the retrain loop's source; needs the gateway (milestone 6)
+  #   since: 7d
+
+# Read docs/tos.md before training on a teacher's outputs.
+teacher:
+  model: <frontier-model-name>
+  provider: anthropic
+  pricing_from_registry: true
+
+curate:
+  filters: [outcome, schema_valid, no_error_loops, length, exact_dedupe, near_dedupe, decontaminate, pii, stratify]
+  near_dedupe_threshold: 0.85
+  min_turns: 2
+  max_turns: 40
+  clusters: 32
+  cap_per_cluster: 400
+  embeddings:
+    provider: hash            # `hash` needs no API key but clusters by token overlap, not meaning.
+    dim: 256                  # Use `sentence-transformers` (local-embeddings extra) for semantic clusters.
+
+dataset:
+  max_seq_len: 8192
+  window_turns: 12
+  with_rationale: false
+
+train:
+  base_model: <org>/<model-8b-instruct>     # run `agentdistill base-check <model>` first
+  method: sft
+  quantization: 4bit                        # null for bf16 LoRA
+  max_seq_len: 8192                         # must match dataset.max_seq_len
+  lora: {r: 32, alpha: 64, dropout: 0.05,
+         target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]}
+  epochs: 2
+  lr: 1.0e-4
+  packing: true                             # requires flash-attn; disabled automatically otherwise
+  seed: 17
+
+onpolicy:
+  rounds: 2
+  k_rollouts: 8
+  rft_cap_per_task: 2
+  dpo_beta: 0.1
+
+eval:
+  eval_set: support-holdout-q3
+  n_per_task: 5
+  policy: strict
+  grader: {type: label}
+  # grader: {type: llm_judge, rubric: rubrics/support.md, judge_model: <mid-tier-model>}
+
+cascade:
+  k_samples: 2
+  max_success_drop_pp: 1.0
+  features: [mean_logprob, min_logprob, p10_logprob, arg_mean_logprob, arg_min_logprob,
+             first_tool_token_entropy, n_tokens, n_tool_calls, has_tool_call, agreement, cluster_prior, turn_idx]
+
+router:
+  lambda_per_usd: 20.0
+  floor: 0.55
+  explore_cap: 0.10
+  decay: 0.995
+
+serve:
+  vllm_url: http://vllm:8000
+  quantization: fp8
+  gpu_usd_per_hour: 1.20
+  guided_json: true

@@ -1,0 +1,21 @@
+{%- set total = messages | selectattr('role', 'equalto', 'assistant') | list | length -%}
+{%- if tools %}<|tools|>
+{%- for t in tools %}
+{{ t.function.name }}: {{ t.function.description }} {{ t.function.parameters | tojson }}
+{%- endfor %}
+<|/tools|>
+{% endif -%}
+{%- for m in messages -%}
+{%- if m.role == 'assistant' -%}
+<|assistant turns={{ total }}|>
+{{ m.content or '' }}
+{%- for c in m.tool_calls or [] %}<|call|>{{ c.function.name }}{{ c.function.arguments }}<|/call|>{% endfor -%}
+<|end|>
+{%- elif m.role == 'tool' -%}
+<|tool_result|>{{ m.content }}<|end|>
+{%- else -%}
+<|{{ m.role }}|>{{ m.content }}<|end|>
+{%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}<|assistant turns={{ total }}|>
+{%- endif -%}

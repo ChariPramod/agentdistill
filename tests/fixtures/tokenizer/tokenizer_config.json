@@ -1,0 +1,9 @@
+{
+  "backend": "tokenizers",
+  "eos_token": "<|endoftext|>",
+  "model_max_length": 1000000000000000019884624838656,
+  "pad_token": "<|pad|>",
+  "tokenizer_class": "TokenizersBackend",
+  "unk_token": "<|unk|>",
+  "chat_template": "{%- if tools %}<|tools|>\n{%- for t in tools %}\n{{ t.function.name }}: {{ t.function.description }} {{ t.function.parameters | tojson }}\n{%- endfor %}\n<|/tools|>\n{% endif -%}\n{%- for m in messages -%}\n{%- if m.role == 'assistant' -%}\n<|assistant|>\n{{ m.content or '' }}\n{%- for c in m.tool_calls or [] %}<|call|>{{ c.function.name }}{{ c.function.arguments }}<|/call|>{% endfor -%}\n<|end|>\n{%- elif m.role == 'tool' -%}\n<|tool_result|>{{ m.content }}<|end|>\n{%- else -%}\n<|{{ m.role }}|>{{ m.content }}<|end|>\n{%- endif -%}\n{%- endfor -%}\n{%- if add_generation_prompt -%}<|assistant|>\n{%- endif -%}\n"
+}
