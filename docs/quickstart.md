@@ -3,8 +3,9 @@
 Ten minutes, no GPU, no API key. At the end you have a hashed training dataset and a curation report that
 explains exactly which traces went into it and why the rest were dropped.
 
-> **Scope.** Milestone 1 (ingest → curate → dataset) is implemented. Training, evaluation, the cascade, the
-> router, and serving are not; those commands exit with a pointer to their milestone rather than pretending.
+> **Scope.** Milestone 1 (ingest → curate → dataset) is complete and SFT training runs. Evaluation, the cascade,
+> the router, and serving are not built; those commands exit with a pointer to their milestone rather than
+> pretending. Until the eval harness exists, an adapter is a `candidate` and nothing more.
 
 ## Install
 
@@ -135,6 +136,25 @@ identical to my-agent v1 (hash 357dcd2f0629) — no new dataset written.
 
 That is the reproducibility guarantee working. Change a filter and you get a new version with a new hash, and
 every training run and eval result downstream is reported against it.
+
+### 5. Train
+
+```bash
+pip install -e ".[train]"
+agentdistill train sft my-agent
+```
+
+This writes a LoRA adapter and records it in the registry as a **candidate**:
+
+```
+done 340 steps, eval_loss 0.8123
+  adapter artifacts/adapters/my-agent-v1
+  status: candidate. Loss is a proxy; run a paired eval against the teacher before trusting it.
+```
+
+`candidate` is the only status an adapter can reach today, and deliberately so. Eval loss going down does not
+mean the agent works — the paired comparison against the teacher that would justify promoting it is milestone 3.
+Do not ship a cost number derived from anything in this step.
 
 ## Next
 

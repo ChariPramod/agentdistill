@@ -445,9 +445,105 @@ def base_check(
 
 
 @train_app.command("sft")
-def train_sft_cmd(dataset: str, config: str = "project.yaml") -> None:
-    """LoRA / QLoRA supervised fine-tuning."""
-    _not_built("SFT training", "milestone 2")
+def train_sft_cmd(
+    dataset: str = typer.Argument(..., help="Dataset name (latest version) or a dataset directory."),
+    config: str = typer.Option("project.yaml", help="Project config."),
+    name: str | None = typer.Option(None, help="Adapter name; defaults to the project name."),
+    out: str | None = typer.Option(None, help="Where to write the adapter; defaults under artifacts/adapters."),
+    max_steps: int | None = typer.Option(None, help="Cap training steps. Useful for a smoke run."),
+) -> None:
+    """LoRA / QLoRA supervised fine-tuning on a built dataset.
+
+    The resulting adapter enters the registry as a `candidate`. Nothing is promoted on loss curves: promotion
+    requires a paired evaluation against the teacher, which lands in milestone 3.
+    """
+    import uuid
+
+    from agentdistill.registry import utcnow
+
+    cfg = _load(config)
+    if cfg.train is None:
+        err.print("[red]project.yaml has no `train` section[/red]; add one with a base_model and re-run.")
+        raise typer.Exit(code=1)
+    reg = _registry(cfg)
+
+    ds = reg.get_dataset(dataset)
+    if ds is not None:
+        dataset_path, dataset_id = ds["path"], ds["id"]
+    else:
+        path = Path(dataset)
+        if not path.exists():
+            err.print(f"[red]no dataset named {dataset!r} in the registry and no directory at {path}[/red]")
+            err.print("Run `agentdistill dataset list` to see what is available.")
+            raise typer.Exit(code=1)
+        dataset_path, dataset_id = str(path), None
+
+    try:
+        from agentdistill.train.sft import TrainingUnavailable, train_sft
+    except ImportError as e:  # pragma: no cover
+        err.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+
+    train_cfg = cfg.train.model_dump()
+    if max_steps is not None:
+        train_cfg["max_steps"] = max_steps
+
+    adapter_name = name or cfg.name
+    version = reg.next_adapter_version(adapter_name)
+    out_dir = Path(out) if out else cfg.artifacts_dir / "adapters" / f"{adapter_name}-v{version}"
+
+    run_id = f"tr_{uuid.uuid4().hex[:16]}"
+    if dataset_id is not None:
+        reg.insert_training_run({
+            "id": run_id, "dataset_id": dataset_id, "base_model": train_cfg["base_model"], "method": "sft",
+            "config": train_cfg, "status": "running", "started_at": utcnow(),
+        })
+
+    console.print(f"[bold]training[/bold] {adapter_name} v{version} from {dataset_path}")
+    console.print(f"  base model  {train_cfg['base_model']}")
+    console.print(f"  quantization {train_cfg.get('quantization') or 'none'}, LoRA r={train_cfg['lora']['r']}")
+
+    try:
+        result = train_sft(train_cfg, dataset_path, out_dir)
+    except TrainingUnavailable as e:
+        if dataset_id is not None:
+            reg.finish_training_run(run_id, "failed", {"error": str(e)}, None)
+        err.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+    except Exception as e:
+        if dataset_id is not None:
+            reg.finish_training_run(run_id, "failed", {"error": f"{type(e).__name__}: {e}"}, None)
+        raise
+
+    if dataset_id is not None:
+        reg.finish_training_run(run_id, "succeeded", result.to_dict(), str(out_dir))
+        reg.insert_adapter({
+            "id": f"ad_{uuid.uuid4().hex[:16]}", "training_run_id": run_id, "name": adapter_name,
+            "version": version, "base_model": train_cfg["base_model"], "path": str(out_dir),
+        })
+
+    loss = f"{result.eval_loss:.4f}" if result.eval_loss is not None else "n/a"
+    console.print(f"[green]done[/green] {result.steps} steps, eval_loss {loss}")
+    console.print(f"  adapter {out_dir}")
+    console.print(
+        "  [dim]status: candidate. Loss is a proxy; run a paired eval against the teacher before trusting it.[/dim]"
+    )
+
+
+@adapter_app.command("list")
+def adapter_list(config: str = typer.Option("project.yaml")) -> None:
+    """List adapters and their lifecycle status."""
+    cfg = _load(config)
+    rows = _registry(cfg).list_adapters()
+    if not rows:
+        console.print("no adapters yet")
+        return
+    table = Table(box=None)
+    for col in ("name", "v", "status", "base model", "path"):
+        table.add_column(col, justify="right" if col == "v" else "left")
+    for r in rows:
+        table.add_row(r["name"], str(r["version"]), r["status"], r["base_model"], r["path"])
+    console.print(table)
 
 
 @train_app.command("onpolicy")

@@ -3,8 +3,13 @@
 > Point it at your production agent's traces. Get back a small model that handles the routine calls, a calibrated
 > escalation gate that sends the rest to the frontier model, and a cost report you can hand to a CFO.
 
-**Status: pre-alpha.** Milestone 1 (ingest → curate → dataset) is implemented. Training, eval, cascade, router, and
-serving are in progress. See [the implementation plan](AgentDistill%20Implementation%20Plan.md) for the full roadmap.
+**Status: pre-alpha.** Milestone 1 (ingest → curate → dataset) is complete, and SFT training runs end to end.
+Evaluation, the cascade, the router, and serving are not built yet; those commands exit with a pointer to their
+milestone rather than pretending. See [the implementation plan](AgentDistill%20Implementation%20Plan.md) for the
+full roadmap.
+
+**No cost or quality claim in this README has been measured yet.** Nothing is promoted on a loss curve, and the
+paired eval that would justify such a claim lands in milestone 3.
 
 ## What it does
 
@@ -31,8 +36,10 @@ pip install "agentdistill[serve]"         # + vLLM
 ```bash
 agentdistill init                                       # writes project.yaml, creates the registry
 agentdistill ingest jsonl traces.jsonl                  # or: ingest agentreplay --db .agentreplay/agentreplay.db
+agentdistill evalset add holdout holdout.jsonl           # register BEFORE curating, so decontamination can run
 agentdistill curate                                     # filters, dedupes, decontaminates, stratifies
-agentdistill dataset build --name support --kind sft    # parquet + manifest + content hash
+agentdistill base-check <org>/<model-8b-instruct>        # is this template usable at all?
+agentdistill train sft <dataset>                         # LoRA / QLoRA -> a candidate adapter
 ```
 
 Every dataset is immutable and carries `reports/curation-<dataset>.md`, which states exactly what was dropped and why.

@@ -39,7 +39,21 @@ jobs:
         run: uv pip install --system -e ".[dev,tokenizers]"
 
       - name: Test
-        run: pytest -q
+        run: pytest -q -m "not slow"
+
+  train:
+    name: training smoke (CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      # bitsandbytes is omitted: it is CUDA-only and the smoke test runs unquantized on CPU.
+      - run: uv pip install --system -e ".[dev,tokenizers]" "torch>=2.3" "trl>=0.12" "peft>=0.12" "accelerate>=0.33"
+      - name: Two optimizer steps on a tiny model
+        run: pytest -q tests/test_sft_smoke.py
 
   lint:
     runs-on: ubuntu-latest

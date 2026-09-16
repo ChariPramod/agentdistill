@@ -366,6 +366,79 @@ class Registry:
         return out
 
     # ----------------------------------------------------------------------------------------------------------
+    # training runs and adapters
+    # ----------------------------------------------------------------------------------------------------------
+
+    def insert_training_run(self, run: dict) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """INSERT INTO training_runs (id, dataset_id, base_model, method, parent_adapter_id, config,
+                                                  metrics, adapter_path, status, started_at, ended_at)
+                       VALUES (:id, :dataset_id, :base_model, :method, :parent_adapter_id, :config,
+                               :metrics, :adapter_path, :status, :started_at, :ended_at)"""
+                ),
+                {
+                    **run,
+                    "config": dumps(run["config"]),
+                    "metrics": dumps(run.get("metrics")),
+                    "parent_adapter_id": run.get("parent_adapter_id"),
+                    "adapter_path": run.get("adapter_path"),
+                    "ended_at": run.get("ended_at"),
+                },
+            )
+
+    def finish_training_run(self, run_id: str, status: str, metrics: dict | None, adapter_path: str | None) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """UPDATE training_runs SET status = :s, metrics = :m, adapter_path = :p, ended_at = :e
+                       WHERE id = :id"""
+                ),
+                {"s": status, "m": dumps(metrics), "p": adapter_path, "e": utcnow(), "id": run_id},
+            )
+
+    def get_training_run(self, run_id: str) -> dict | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(text("SELECT * FROM training_runs WHERE id = :id"), {"id": run_id}).mappings().first()
+        if not row:
+            return None
+        run = dict(row)
+        run["config"] = loads(run["config"])
+        run["metrics"] = loads(run["metrics"])
+        return run
+
+    def next_adapter_version(self, name: str) -> int:
+        with self.engine.connect() as conn:
+            row = conn.execute(text("SELECT MAX(version) FROM adapters WHERE name = :n"), {"n": name}).first()
+        return (row[0] or 0) + 1 if row else 1
+
+    def insert_adapter(self, adapter: dict) -> None:
+        """New adapters enter as `candidate`. Nothing is promoted on loss curves; promotion requires a paired
+        eval against the current prod adapter."""
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """INSERT INTO adapters (id, training_run_id, name, version, base_model, merged, quantization,
+                                             path, status, created_at)
+                       VALUES (:id, :training_run_id, :name, :version, :base_model, :merged, :quantization,
+                               :path, :status, :created_at)"""
+                ),
+                {
+                    "merged": False,
+                    "quantization": None,
+                    "status": "candidate",
+                    "created_at": utcnow(),
+                    **adapter,
+                },
+            )
+
+    def list_adapters(self) -> list[dict]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(text("SELECT * FROM adapters ORDER BY name, version")).mappings().fetchall()
+        return [dict(r) for r in rows]
+
+    # ----------------------------------------------------------------------------------------------------------
     # eval sets
     # ----------------------------------------------------------------------------------------------------------
 
