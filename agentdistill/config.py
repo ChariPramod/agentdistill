@@ -179,12 +179,25 @@ class LoraConfig(StrictModel):
     )
 
 
+class ToolParserConfig(StrictModel):
+    """How tool calls are recovered from generated text.
+
+    `name` is vLLM's parser name and goes straight into `vllm serve --tool-call-parser`. `family` selects the
+    fallback regex used when vLLM is not installed. Setting both means `base-check` and the serving command agree
+    on one answer instead of each guessing.
+    """
+
+    name: str | None = None
+    family: Literal["hermes", "llama3_json", "agentdistill_fixture"] | None = None
+
+
 class TrainConfig(StrictModel):
     base_model: str
     method: Literal["sft", "dpo", "rft", "grpo"] = "sft"
     backend: Literal["trl", "unsloth"] = "trl"
     quantization: Literal["4bit", "8bit"] | None = "4bit"
     lora: LoraConfig = Field(default_factory=LoraConfig)
+    tool_parser: ToolParserConfig = Field(default_factory=ToolParserConfig)
     max_seq_len: int = Field(8192, ge=128)
     epochs: float = 2
     lr: float = 1.0e-4

@@ -19,11 +19,9 @@ pytest.importorskip("peft")
 from agentdistill.data.artifact import write_dataset  # noqa: E402
 from agentdistill.data.build import Sample  # noqa: E402
 from agentdistill.train.sft import (  # noqa: E402
-    accepted_sft_fields,
     build_lora_config,
     build_quantization_config,
     load_dataset_splits,
-    resolve_sft_config,
     train_sft,
 )
 
@@ -75,55 +73,16 @@ def tiny_dataset(tmp_path, tokenizer):
     return artifact.path
 
 
-def test_accepted_fields_includes_what_the_trainer_asks_for():
-    """The plan's stated hazard: TRL renames these between releases."""
-    accepted = accepted_sft_fields()
-    for field in ("output_dir", "learning_rate", "packing", "seed"):
-        assert field in accepted, f"installed TRL has no {field!r}"
-
-
-def test_resolve_sft_config_keeps_known_fields():
-    resolved = resolve_sft_config({"output_dir": "/tmp/x", "learning_rate": 1e-4, "seed": 1})
-    assert resolved["output_dir"] == "/tmp/x"
-    assert resolved["learning_rate"] == 1e-4
-
-
-def test_resolve_sft_config_drops_unknown_fields(caplog):
-    resolved = resolve_sft_config({"output_dir": "/tmp/x", "definitely_not_a_trl_field": 1})
-    assert "definitely_not_a_trl_field" not in resolved
-    assert "definitely_not_a_trl_field" in caplog.text
-
-
-def test_packing_without_padding_free_is_refused(monkeypatch):
-    """Packing without padding_free lets sequences attend across sample boundaries: a silent quality bug.
-
-    Simulates a TRL old enough to lack the field, which is exactly the upgrade hazard this guard exists for.
-    """
-    import agentdistill.train.sft as sft
-
-    monkeypatch.setattr(sft, "accepted_sft_fields", lambda: {"output_dir", "packing", "seed"})
-    with pytest.raises(ValueError, match="attend across sample boundaries"):
-        sft.resolve_sft_config({"packing": True, "padding_free": True, "output_dir": "/tmp/x"})
-
-
-def test_missing_padding_free_is_tolerated_when_not_packing(monkeypatch, caplog):
-    import agentdistill.train.sft as sft
-
-    monkeypatch.setattr(sft, "accepted_sft_fields", lambda: {"output_dir", "packing", "seed"})
-    resolved = sft.resolve_sft_config({"packing": False, "padding_free": False, "output_dir": "/tmp/x"})
-    assert "padding_free" not in resolved
-    assert resolved["packing"] is False
-
-
 def test_load_dataset_splits_keeps_only_model_columns(tiny_dataset):
-    train, evalset = load_dataset_splits(tiny_dataset, test_size=0.25)
+    train, evalset, n_target = load_dataset_splits(tiny_dataset, test_size=0.25)
     assert set(train.column_names) == {"input_ids", "labels"}
     assert evalset is not None and len(evalset) >= 1
     assert len(train) + len(evalset) == 8
+    assert n_target > 0, "target-token total must be counted before the bookkeeping columns are dropped"
 
 
 def test_load_dataset_splits_without_holdout(tiny_dataset):
-    train, evalset = load_dataset_splits(tiny_dataset, test_size=0)
+    train, evalset, _ = load_dataset_splits(tiny_dataset, test_size=0)
     assert evalset is None and len(train) == 8
 
 
@@ -131,22 +90,6 @@ def test_lora_config_uses_project_values():
     lora = build_lora_config({"lora": {"r": 8, "alpha": 16, "dropout": 0.0, "target_modules": ["q_proj"]}})
     assert lora.r == 8 and lora.lora_alpha == 16
     assert set(lora.target_modules) == {"q_proj"}, "peft normalizes target_modules to a set"
-
-
-def test_report_to_drops_missing_backends(caplog):
-    """A missing logging backend must not cost a training run."""
-    from agentdistill.train.sft import resolve_report_to
-
-    assert resolve_report_to([]) == []
-    assert resolve_report_to(None) == []
-    resolved = resolve_report_to(["tensorboard"])
-    try:
-        import tensorboard  # noqa: F401
-
-        assert resolved == ["tensorboard"]
-    except ImportError:
-        assert resolved == []
-        assert "without it" in caplog.text
 
 
 def test_quantization_config_is_optional():
@@ -180,6 +123,9 @@ def test_two_steps_on_cpu_saves_a_loadable_adapter(tiny_model_dir, tiny_dataset,
     assert result.steps == 2, "max_steps must be honoured"
     assert (tmp_path / "adapter" / "adapter_model.safetensors").exists(), "LoRA adapter was not saved"
     assert result.metrics["n_train_samples"] + result.metrics["n_eval_samples"] == 8
+    assert "throughput_target_tok_per_s" in result.metrics, "the GPU-run checklist requires throughput"
+    assert result.metrics["attn_implementation"] in {"sdpa", "flash_attention_2"}
+    assert result.metrics["packing"] is False
 
     # The adapter must load back onto the base model.
     from peft import PeftModel

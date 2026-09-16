@@ -1,0 +1,211 @@
+{
+  "version": 1,
+  "description": "Shared canonical-JSON test vectors. Every implementation that computes args_hash -- agentdistill/canonical.py (Python), mcpgate packages/gateway/src/audit/canonical.ts (TypeScript), agentreplay's exporter -- must reproduce `normalized`, `canonical`, and `args_hash` exactly. A mismatch means replay lookups and audit correlation across the three stores will not line up.",
+  "spec": "docs/canonical-json.md",
+  "vectors": [
+    {
+      "name": "key_order",
+      "note": "Object keys sort byte-wise, so argument order never changes the hash.",
+      "tool": "search_orders",
+      "args": {
+        "limit": 5,
+        "customer_id": "c_9"
+      },
+      "normalized": {
+        "customer_id": "c_9",
+        "limit": 5
+      },
+      "canonical": "{\"args\":{\"customer_id\":\"c_9\",\"limit\":5},\"tool\":\"search_orders\"}",
+      "args_hash": "6e50d080f5bc66b1702cd3188eebd1accfbff51c505c1e08fbc317949728f8c9"
+    },
+    {
+      "name": "nested_objects",
+      "note": "Sorting is recursive.",
+      "tool": "update_address",
+      "args": {
+        "customer_id": "c_1",
+        "address": {
+          "zip": "02139",
+          "city": "Cambridge",
+          "street": "12 Main St"
+        }
+      },
+      "normalized": {
+        "address": {
+          "city": "Cambridge",
+          "street": "12 Main St",
+          "zip": "02139"
+        },
+        "customer_id": "c_1"
+      },
+      "canonical": "{\"args\":{\"address\":{\"city\":\"Cambridge\",\"street\":\"12 Main St\",\"zip\":\"02139\"},\"customer_id\":\"c_1\"},\"tool\":\"update_address\"}",
+      "args_hash": "c3469c544d86b3bcb6a8b8095e608d59285b17fa87ba5c78b3cd99f27a44aba1"
+    },
+    {
+      "name": "unicode_preserved",
+      "note": "Serialized as UTF-8 with no ASCII escaping; the bytes are the text.",
+      "tool": "create_ticket",
+      "args": {
+        "summary": "café — naïve résumé",
+        "category": "billing"
+      },
+      "normalized": {
+        "category": "billing",
+        "summary": "café — naïve résumé"
+      },
+      "canonical": "{\"args\":{\"category\":\"billing\",\"summary\":\"café — naïve résumé\"},\"tool\":\"create_ticket\"}",
+      "args_hash": "2e88e5bf3fc83a36b4f80fdec0729ada5b721f8b1de99131eeda6fe056f8f221"
+    },
+    {
+      "name": "string_trimmed",
+      "note": "Leading and trailing whitespace is not meaning.",
+      "tool": "get_customer",
+      "args": {
+        "email": "  bob@example.com  "
+      },
+      "normalized": {
+        "email": "bob@example.com"
+      },
+      "canonical": "{\"args\":{\"email\":\"bob@example.com\"},\"tool\":\"get_customer\"}",
+      "args_hash": "3192927b6e482860edbf95be68011572fbc0d4c9be743667bc21e9f6b4ebb64f"
+    },
+    {
+      "name": "float_rounding",
+      "note": "Floats round to 6 decimals; float noise must not split a hash.",
+      "tool": "issue_refund",
+      "args": {
+        "order_id": "o_1",
+        "amount": 42.5000000001
+      },
+      "normalized": {
+        "amount": 42.5,
+        "order_id": "o_1"
+      },
+      "canonical": "{\"args\":{\"amount\":42.5,\"order_id\":\"o_1\"},\"tool\":\"issue_refund\"}",
+      "args_hash": "3ee8f16184a0674f590b7c61b29c06f06a471d9ba10acbe924cffe975f15606f"
+    },
+    {
+      "name": "int_not_float",
+      "note": "An integer stays an integer. 5 and 5.0 are different arguments.",
+      "tool": "list_orders",
+      "args": {
+        "limit": 5
+      },
+      "normalized": {
+        "limit": 5
+      },
+      "canonical": "{\"args\":{\"limit\":5},\"tool\":\"list_orders\"}",
+      "args_hash": "6eb18e070bfd2afc5b3ab1c981d678a8a52149f3a365de42a17d753e6bd04fb4"
+    },
+    {
+      "name": "negative_zero",
+      "note": "Sign of zero carries no meaning and is normalized away.",
+      "tool": "issue_refund",
+      "args": {
+        "order_id": "o_1",
+        "amount": -0.0
+      },
+      "normalized": {
+        "amount": 0.0,
+        "order_id": "o_1"
+      },
+      "canonical": "{\"args\":{\"amount\":0.0,\"order_id\":\"o_1\"},\"tool\":\"issue_refund\"}",
+      "args_hash": "abde1342c6aaad54bd8780de277f284c79438d54797ea8796e227e7f7895314e"
+    },
+    {
+      "name": "booleans_and_null",
+      "note": "Booleans and null pass through; bool must not be treated as int.",
+      "tool": "list_orders",
+      "args": {
+        "include_cancelled": true,
+        "status": null
+      },
+      "normalized": {
+        "include_cancelled": true,
+        "status": null
+      },
+      "canonical": "{\"args\":{\"include_cancelled\":true,\"status\":null},\"tool\":\"list_orders\"}",
+      "args_hash": "97273bc84e68c5b6c32a24c9c0b7f280ffeee25a7492a2f1e57b02b3d6dbbd08"
+    },
+    {
+      "name": "drop_volatile_keys",
+      "note": "Volatile keys are dropped so the same call replays across runs.",
+      "tool": "get_order",
+      "args": {
+        "order_id": "o_1",
+        "request_id": "req_abc",
+        "timestamp": "2026-09-15T12:00:00Z",
+        "nonce": "xyz"
+      },
+      "normalized": {
+        "order_id": "o_1"
+      },
+      "canonical": "{\"args\":{\"order_id\":\"o_1\"},\"tool\":\"get_order\"}",
+      "args_hash": "10ad418623141f80a9e33e3ae22db1c7743ea7ea7dadc92e2c91a23dddf95c0f"
+    },
+    {
+      "name": "timestamp_formats",
+      "note": "Three ISO-8601 shapes all collapse to <ts>.",
+      "tool": "list_orders",
+      "args": {
+        "a": "2026-09-15",
+        "b": "2026-09-15T12:00:00Z",
+        "c": "2026-09-15T12:00:00.123+05:30"
+      },
+      "normalized": {
+        "a": "<ts>",
+        "b": "<ts>",
+        "c": "<ts>"
+      },
+      "canonical": "{\"args\":{\"a\":\"<ts>\",\"b\":\"<ts>\",\"c\":\"<ts>\"},\"tool\":\"list_orders\"}",
+      "args_hash": "77c095137c50ef4b2e823759c7409904c050a10951375d6dd0c5ea66cd4867e9"
+    },
+    {
+      "name": "uuid_in_array",
+      "note": "UUIDs collapse to <uuid> anywhere, including inside arrays; non-UUIDs are untouched.",
+      "tool": "create_ticket",
+      "args": {
+        "refs": [
+          "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+          "not-a-uuid"
+        ]
+      },
+      "normalized": {
+        "refs": [
+          "<uuid>",
+          "not-a-uuid"
+        ]
+      },
+      "canonical": "{\"args\":{\"refs\":[\"<uuid>\",\"not-a-uuid\"]},\"tool\":\"create_ticket\"}",
+      "args_hash": "e42624ea04d2e29051b1621e32e1e7d5a5b2878076f0533558eb394f735b14d4"
+    },
+    {
+      "name": "array_order_significant",
+      "note": "Array order is meaning and is preserved.",
+      "tool": "create_ticket",
+      "args": {
+        "tags": [
+          "b",
+          "a"
+        ]
+      },
+      "normalized": {
+        "tags": [
+          "b",
+          "a"
+        ]
+      },
+      "canonical": "{\"args\":{\"tags\":[\"b\",\"a\"]},\"tool\":\"create_ticket\"}",
+      "args_hash": "4e536b5b02a7f2abfed760afa28237553085a1aaef32a6aeed5527decfd5e34a"
+    },
+    {
+      "name": "empty_args",
+      "note": "An empty object is a valid call.",
+      "tool": "list_orders",
+      "args": {},
+      "normalized": {},
+      "canonical": "{\"args\":{},\"tool\":\"list_orders\"}",
+      "args_hash": "f49caeb27a2718b6d93cb0126f6ed531e70f9e4bceaf4c8c91cdea39c47a53e5"
+    }
+  ]
+}

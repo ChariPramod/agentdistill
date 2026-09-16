@@ -370,13 +370,23 @@ Garbage traces produce a confident, wrong student. Curation is where most of the
 | `length` | 2 to 40 assistant turns; total tokens within `max_seq_len` for trajectory samples | on |
 | `teacher` | restrict to one teacher model | off |
 | `exact_dedupe` | drop duplicate `content_hash` | on |
-| `near_dedupe` | MinHash LSH over concatenated assistant text, Jaccard >= 0.85 on 5-gram shingles | on |
+| `near_dedupe` | MinHash LSH proposes candidates; each candidate pair is verified with the MinHash Jaccard estimate against the threshold before a drop. LSH banding is approximate and returns pairs below threshold. | on |
 | `decontaminate` | drop any trace whose task_input shares an exact match or >= 50 percent 8-gram overlap with any eval set task | on |
 | `pii` | run the redaction hook; drop traces where redaction changed a tool argument (the model must not learn placeholder tokens as valid args) | on |
 | `quality_judge` | optional: judge rates trajectory efficiency and correctness 1 to 5; drop < 3 | off |
 | `stratify` | cluster task inputs (k-means over embeddings, K from config); cap samples per cluster at `cap_per_cluster`; report coverage | on |
 
 ### 3.2 Near-duplicate detection
+
+> **As built.** LSH proposes; the threshold disposes. `MinHashLSH.query` is deliberately loose and returns
+> candidate pairs well below the threshold it was constructed with, so every candidate is verified with the
+> MinHash Jaccard estimate before a drop. Dropping candidates unverified would discard traces the configured rule
+> says to keep.
+>
+> `near_dedupe_normalize_literals` (mask numbers, ids, and timestamps before shingling) is **off by default**. It
+> collapses short corpora to roughly one sample per trajectory shape, because once ids are masked every trace of
+> a given shape is identical. Turn it on only for corpora with long assistant text.
+
 
 ```python
 # agentdistill/curate/dedupe.py
@@ -478,6 +488,16 @@ If any check fails, the CLI names the template and stops. Supporting a template 
 ### 4.3 Loss masking
 
 Offsets-based masking is robust to templates that change tokenization at message boundaries.
+
+> **As built.** A token is a target if its **start offset** lies inside an assistant span. Tokens straddling the
+> *end* boundary (an end-of-turn marker merged with a following newline) are targets; tokens straddling the
+> *start* boundary (a header merged with the first content token) are not. Requiring full containment would drop
+> the token most likely to straddle -- the end-of-turn marker -- producing a student that never learns to stop.
+>
+> Guarded by `tests/test_mask_invariants.py`, which derives the assistant header and end-of-turn string from each
+> template and asserts: exactly one end-of-turn marker per assistant turn in the targets, no header leakage, the
+> last target ends the turn, and every tool call sits wholly inside the targets. It runs on three templates
+> including real hermes and llama3 shapes.
 
 ```python
 # agentdistill/data/build.py
@@ -1689,3 +1709,12 @@ The first five working days. Each day ends with a commit that passes CI. No GPU 
 - Milestone 1 review against its definition of done.
 
 After day 5, follow the milestone order in section 15. Do not build the gateway before the eval harness exists, and do not publish any cost number that was not measured through the harness on the quantized artifact.
+
+
+---
+
+## 20. Divergences from this plan
+
+The code has diverged from v0.1 in a few places, each because the plan was internally inconsistent or wrong about
+how a library behaves. Every divergence is recorded, with its reasoning, in [`docs/progress.md`](docs/progress.md).
+Sections 3.1, 3.2, and 4.3 above have been updated in place to describe what the code does.

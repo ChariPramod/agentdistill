@@ -1,0 +1,28 @@
+{%- if tools %}<|im_start|>system
+You are a function calling AI model. You are provided with function signatures within <tools></tools>:
+<tools>
+{%- for t in tools %}
+{{ t.function | tojson }}
+{%- endfor %}
+</tools>
+For each function call, return a json object within <tool_call></tool_call> tags.<|im_end|>
+{% endif -%}
+{%- for m in messages -%}
+{%- if m.role == 'assistant' -%}
+<|im_start|>assistant
+{{ m.content or '' }}
+{%- for c in m.tool_calls or [] %}<tool_call>
+{"name": "{{ c.function.name }}", "arguments": {{ c.function.arguments }}}
+</tool_call>{% endfor %}<|im_end|>
+{% elif m.role == 'tool' -%}
+<|im_start|>user
+<tool_response>
+{{ m.content }}
+</tool_response><|im_end|>
+{% else -%}
+<|im_start|>{{ m.role }}
+{{ m.content }}<|im_end|>
+{% endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}<|im_start|>assistant
+{% endif -%}

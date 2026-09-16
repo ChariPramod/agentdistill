@@ -408,11 +408,28 @@ def evalset_list(config: str = typer.Option("project.yaml")) -> None:
 @app.command("base-check")
 def base_check(
     model: str = typer.Argument(..., help="Base model id or local path."),
+    config: str | None = typer.Option(None, help="Project config, for train.tool_parser."),
+    parser_name: str | None = typer.Option(None, help="vLLM tool parser name, e.g. hermes."),
+    family: str | None = typer.Option(None, help="Fallback parser family: hermes, llama3_json."),
+    allow_unparsed: bool = typer.Option(
+        False, help="Accept a template whose tool calls no parser can recover. You will not be able to serve it."
+    ),
     json_out: bool = typer.Option(False, "--json", help="Emit the report as JSON."),
 ) -> None:
-    """Check a base model's chat template for tool support, prefix stability, and masking compatibility."""
+    """Check a base model's chat template: tool support, prefix stability, masking, and the tool-call round trip.
+
+    The round trip is the check that prevents a wasted GPU day. vLLM recovers tool calls from generated *text*
+    with a template-specific parser; if training data renders them in a shape that parser cannot read, the student
+    is useless however good its loss looks.
+    """
     from agentdistill.data.dataset import load_tokenizer
-    from agentdistill.data.template_check import check_template, roundtrip_tool_call
+    from agentdistill.data.template_check import check_template, detect_family, roundtrip_tool_call
+
+    if config and (parser_name is None or family is None):
+        cfg = _load(config)
+        if cfg.train is not None:
+            parser_name = parser_name or cfg.train.tool_parser.name
+            family = family or cfg.train.tool_parser.family
 
     try:
         tok = load_tokenizer(model)
@@ -421,9 +438,14 @@ def base_check(
         raise typer.Exit(code=1) from e
 
     report = check_template(tok, model)
+    trip = roundtrip_tool_call(tok, parser_name=parser_name, family=family) if report.ok else None
+
     if json_out:
-        console.print_json(json.dumps(report.to_dict()))
-        raise typer.Exit(code=0 if report.ok else 1)
+        payload = report.to_dict()
+        payload["roundtrip"] = trip
+        payload["detected_family"] = detect_family(tok)
+        console.print_json(json.dumps(payload, default=str))
+        raise typer.Exit(code=0 if report.ok and (trip is None or trip["ok"] or allow_unparsed) else 1)
 
     table = Table(title=f"chat template: {model}", box=None)
     table.add_column("check")
@@ -431,17 +453,39 @@ def base_check(
     table.add_column("detail", overflow="fold")
     for c in report.checks:
         table.add_row(c.name, "[green]PASS[/green]" if c.ok else "[red]FAIL[/red]", c.detail)
-    if report.ok:
-        ok, detail = roundtrip_tool_call(tok)
-        table.add_row("tool_call_roundtrip", "[green]PASS[/green]" if ok else "[red]FAIL[/red]", detail)
+    if trip is not None:
+        table.add_row(
+            "tool_call_roundtrip",
+            "[green]PASS[/green]" if trip["ok"] else "[red]FAIL[/red]",
+            f"via {trip['parser']}. {trip['detail']}".strip(),
+        )
     console.print(table)
 
-    if report.ok:
-        console.print("\n[green]usable as a base model.[/green] "
-                      "Verify the vLLM tool-call parser for this template before serving.")
-    else:
+    if not report.ok:
         console.print("\n[red]not usable as a base model for dataset building.[/red]")
         raise typer.Exit(code=1)
+
+    detected = detect_family(tok)
+    if trip is not None and not trip["ok"]:
+        console.print("\n[red]the tool-call round trip failed.[/red] The template rendered:")
+        console.print(f"  [dim]{trip['model_output'][:400]!r}[/dim]")
+        console.print(f"  expected the parser to recover {trip['expected']}, got {trip['parsed']}")
+        if not allow_unparsed:
+            console.print(
+                "\nTraining on this would produce a student whose tool calls the serving stack silently drops. "
+                "Set train.tool_parser, or pass --allow-unparsed if you know what you are doing."
+            )
+            raise typer.Exit(code=1)
+        console.print("\n[yellow]--allow-unparsed: continuing anyway. You will not be able to serve this.[/yellow]")
+
+    console.print("\n[green]usable as a base model.[/green]")
+    if detected and not parser_name:
+        console.print(
+            f"  Detected tool-call family [bold]{detected}[/bold]. Set train.tool_parser in project.yaml "
+            f"(name = vLLM's parser name, family = {detected}) so serving uses the same answer."
+        )
+    if trip is not None and trip["parser"].startswith("fallback"):
+        console.print("  [dim]Verified with the fallback regex; vLLM is not installed here.[/dim]")
 
 
 @train_app.command("sft")

@@ -1,0 +1,27 @@
+{%- if tools %}<|start_header_id|>system<|end_header_id|>
+
+You have access to the following functions. To call one, respond with a JSON object of the form
+{"name": function name, "parameters": dictionary of arguments}.
+
+{% for t in tools %}{{ t.function | tojson }}
+{% endfor %}<|eot_id|>
+{% endif -%}
+{%- for m in messages -%}
+{%- if m.role == 'assistant' -%}
+<|start_header_id|>assistant<|end_header_id|>
+
+{{ m.content or '' }}
+{%- for c in m.tool_calls %}{"name": "{{ c.function.name }}", "parameters": {{ c.function.arguments }}}{% endfor %}<|eot_id|>
+{% elif m.role == 'tool' -%}
+<|start_header_id|>ipython<|end_header_id|>
+
+{{ m.content }}<|eot_id|>
+{% else -%}
+<|start_header_id|>{{ m.role }}<|end_header_id|>
+
+{{ m.content }}<|eot_id|>
+{% endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}<|start_header_id|>assistant<|end_header_id|>
+
+{% endif -%}

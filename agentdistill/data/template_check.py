@@ -20,6 +20,7 @@ Checks, in the order they run:
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -189,29 +190,182 @@ def check_template(tok: Any, model: str = "<tokenizer>") -> TemplateReport:
     return report
 
 
-def roundtrip_tool_call(tok: Any, parser: Any = None) -> tuple[bool, str]:
-    """Render a tool call and parse it back.
+# --------------------------------------------------------------------------------------------------------------
+# Tool-call round trip
+# --------------------------------------------------------------------------------------------------------------
+#
+# The student will be served by vLLM, which recovers tool calls from generated *text* with a template-specific
+# parser. If the training data renders tool calls in a shape that parser cannot read, the student is useless no
+# matter how good its loss is -- and you find out after the GPU bill, not before. This check runs before any
+# training and costs nothing.
 
-    With no parser supplied this is a containment check: the name and every argument value survive rendering.
-    Pass a callable `parser(text) -> [{"name":..., "arguments": {...}}]` (for instance a vLLM tool parser) to make
-    it a true round trip; the serving stack is the only authority on whether its parser can read the template.
+FALLBACK_PARSERS: dict[str, re.Pattern[str]] = {
+    # hermes / qwen style: <tool_call>{"name": ..., "arguments": {...}}</tool_call>
+    "hermes": re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S),
+    # llama 3.x json style: {"name": ..., "parameters": {...}}
+    "llama3_json": re.compile(r'(\{\s*"name"\s*:\s*".+?"\s*,\s*"parameters"\s*:\s*\{.*\}\s*\})', re.S),
+    # the repo's fixture templates: <|call|>name{json}<|/call|>
+    "agentdistill_fixture": re.compile(r"<\|call\|>([A-Za-z0-9_]+)(\{.*?\})<\|/call\|>", re.S),
+}
+
+
+def example_from_schema(schema: dict[str, Any]) -> Any:
+    """A minimal instance satisfying a JSON schema, used as the payload for the round trip.
+
+    Only required properties are filled: the point is to exercise the template and the parser, not to produce a
+    realistic call.
     """
-    text = render(tok, SAMPLE_MESSAGES[:3], SAMPLE_TOOLS)
-    expected_args = json.loads(SAMPLE_MESSAGES[2]["tool_calls"][0]["function"]["arguments"])
-    if parser is None:
-        missing = [str(v) for v in expected_args.values() if str(v) not in text]
-        if "search_orders" not in text or missing:
-            return False, f"rendered tool call is missing name or values {missing}"
-        return True, "containment check only; supply a parser for a true round trip"
+    t = schema.get("type")
+    if "enum" in schema:
+        return schema["enum"][0]
+    if t == "object":
+        props = schema.get("properties", {})
+        req = schema.get("required", list(props))
+        return {k: example_from_schema(props[k]) for k in req if k in props}
+    if t == "array":
+        return [example_from_schema(schema.get("items", {"type": "string"}))]
+    if t == "integer":
+        return 7
+    if t == "number":
+        return 7.5
+    if t == "boolean":
+        return True
+    return "x"
+
+
+def parse_with_vllm(model_output: str, tok: Any, parser_name: str | None) -> list[tuple[str, dict]] | None:
+    """Parse with vLLM's own tool parser. Returns None when vLLM is unavailable, so callers fall back.
+
+    None means "could not check", which is different from [] meaning "no tool call found". Conflating them would
+    turn a missing dependency into a passing test.
+    """
+    if not parser_name:
+        return None
     try:
-        parsed = parser(text)
-    except Exception as e:
-        return False, f"parser raised {type(e).__name__}: {e}"
-    if not parsed:
-        return False, "parser found no tool call in the rendered text"
-    got = parsed[0]
-    if got.get("name") != "search_orders":
-        return False, f"parser recovered tool name {got.get('name')!r}, expected 'search_orders'"
-    if got.get("arguments") != expected_args:
-        return False, f"parser recovered arguments {got.get('arguments')!r}, expected {expected_args!r}"
-    return True, "round trip through the parser recovered name and arguments"
+        from vllm.entrypoints.openai.tool_parsers import ToolParserManager
+    except Exception:
+        return None
+    try:
+        parser = ToolParserManager.get_tool_parser(parser_name)(tok)
+        info = parser.extract_tool_calls(model_output, request=None)
+    except Exception as e:  # pragma: no cover - depends on the installed vLLM
+        raise TemplateError(
+            f"vLLM tool parser {parser_name!r} failed on rendered output: {type(e).__name__}: {e}. "
+            f"Check the parser name against `vllm serve --help` for this template family."
+        ) from e
+    if not getattr(info, "tools_called", False):
+        return []
+    return [(c.function.name, json.loads(c.function.arguments)) for c in info.tool_calls]
+
+
+def parse_fallback(model_output: str, family: str) -> list[tuple[str, dict]]:
+    """Regex parser standing in for vLLM when it is not installed (it is Linux/CUDA only).
+
+    This is a check that the rendered shape is *recoverable*, not a claim that vLLM will recover it. The
+    definitive check is the vLLM path; `base-check` reports which one ran.
+    """
+    pattern = FALLBACK_PARSERS.get(family)
+    if pattern is None:
+        raise TemplateError(
+            f"unknown tool-call family {family!r}; known families are {sorted(FALLBACK_PARSERS)}. "
+            f"Set train.tool_parser.family in project.yaml."
+        )
+    out: list[tuple[str, dict]] = []
+    for m in pattern.finditer(model_output):
+        if family == "agentdistill_fixture":
+            out.append((m.group(1), json.loads(m.group(2))))
+            continue
+        obj = json.loads(m.group(1))
+        args = obj.get("arguments", obj.get("parameters", {}))
+        out.append((obj["name"], args))
+    return out
+
+
+def detect_family(tok: Any, tools: list[dict] | None = None) -> str | None:
+    """Guess the tool-call family from what the template actually renders.
+
+    A guess is offered so `base-check` is useful on a new model without configuration, but it is reported as a
+    guess: `train.tool_parser` is what feeds the serving command, and it should be set explicitly.
+    """
+    tools = tools or SAMPLE_TOOLS
+    try:
+        rendered = render(tok, SAMPLE_MESSAGES[:3], tools)
+    except Exception:
+        return None
+    for family, pattern in FALLBACK_PARSERS.items():
+        if pattern.search(rendered):
+            return family
+    return None
+
+
+def roundtrip_tool_call(
+    tok: Any,
+    tools: list[dict] | None = None,
+    parser_name: str | None = None,
+    family: str | None = None,
+) -> dict:
+    """Render one assistant tool call, strip the prompt header, parse the remainder back, and compare.
+
+    Returns a dict rather than raising: `base-check` prints the mismatch so a user can see what the template
+    produced versus what the parser recovered.
+    """
+    tools = tools or SAMPLE_TOOLS
+    fn = tools[0]["function"]
+    args = example_from_schema(fn.get("parameters", {"type": "object"}))
+    msgs = [
+        {"role": "system", "content": "You are a test."},
+        {"role": "user", "content": "Do the thing."},
+    ]
+    assistant = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {"id": "call_0", "type": "function", "function": {"name": fn["name"], "arguments": json.dumps(args)}}
+        ],
+    }
+    full = render(tok, [*msgs, assistant], tools, add_generation_prompt=False)
+    header = render(tok, msgs, tools, add_generation_prompt=True)
+    if not full.startswith(header):
+        return {
+            "ok": False,
+            "parser": "none",
+            "detail": "template is not prefix-stable; the model's own output cannot be isolated from the prompt",
+            "expected": [(fn["name"], args)],
+            "parsed": None,
+            "model_output": "",
+        }
+
+    model_output = full[len(header) :]
+    resolved_family = family or detect_family(tok, tools)
+
+    parsed = parse_with_vllm(model_output, tok, parser_name)
+    source = "vllm"
+    if parsed is None:
+        if resolved_family is None:
+            return {
+                "ok": False,
+                "parser": "none",
+                "detail": (
+                    "vLLM is not installed and the rendered tool call matches no known family, so nothing could "
+                    "verify it. Set train.tool_parser.family, or install vLLM to check against the real parser."
+                ),
+                "expected": [(fn["name"], args)],
+                "parsed": None,
+                "model_output": model_output,
+            }
+        parsed = parse_fallback(model_output, resolved_family)
+        source = f"fallback:{resolved_family}"
+
+    expected = [(fn["name"], args)]
+    ok = parsed == expected
+    detail = "" if ok else "the parser did not recover the rendered call; the serving stack would drop it"
+    if ok and source.startswith("fallback"):
+        detail = "verified with the fallback regex; install vLLM to check against the parser that will serve it"
+    return {
+        "ok": ok,
+        "parser": source,
+        "detail": detail,
+        "expected": expected,
+        "parsed": parsed,
+        "model_output": model_output,
+    }
