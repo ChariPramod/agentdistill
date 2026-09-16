@@ -85,6 +85,21 @@ The default `hash` embedder needs no API key and is deterministic, which keeps t
 clusters by token overlap rather than meaning. The report says so every time. Set
 `curate.embeddings.provider: sentence-transformers` (with the `local-embeddings` extra) before trusting the table.
 
+## Scenario phrasing is part of the design, not decoration
+
+If every instance of a task shape uses the same sentence, decontamination will eat the corpus — and it will be
+right to. A training instance and a holdout instance of one shape share almost all of their 8-grams when only an
+id differs between them, so the overlap check cannot tell "the same task twice" from "a near-duplicate of the
+eval set".
+
+Measured on the example project: 40 scenario shapes with one fixed message each lost **48 traces** to
+decontamination. Giving each shape varied openers, asides and closers — the way people actually write to
+support — dropped that to **19**, and raised the curated corpus from 234 samples to 296.
+
+This is not cosmetic. Varied phrasing is what makes the clusters meaningful, what keeps decontamination measuring
+genuine overlap instead of shared boilerplate, and what stops a student learning a template it will never see in
+production. Treat it as part of writing a scenario.
+
 ## Reproducibility
 
 A dataset's identity is `sha256(sorted sample hashes + tokenizer + max_seq_len + filter config + kind + target)`.

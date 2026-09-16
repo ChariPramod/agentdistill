@@ -27,12 +27,12 @@ PYTHONPATH=../.. agentdistill eval run recorded --eval-set support-holdout-v1 --
 | `agent.py` | A plain LiteLLM tool-calling loop — the agent whose traces get distilled |
 | `record.py` | Runs tasks, grades them, writes JSONL that `ingest jsonl` accepts |
 | `replay_grader.py` | Rebuilds end state from the student's own calls, for grading under replay |
-| `scripted_teacher.py` | A rule-based solver so the chain runs with no API key |
+| `scripted_teacher.py` | A rule-based teacher so the chain runs with no API key |
 | `split_corpus.py` | Splits a recording into training traces and two frozen eval sets |
 
-## The scripted solver is not a teacher
+## The scripted teacher is not a teacher
 
-`--scripted` uses a rule-based solver. It reacts to real tool results from a real stateful database, so
+`--scripted` uses a rule-based teacher. It reacts to real tool results from a real stateful database, so
 trajectories have the right shape, but it is a **generator** — and the whole reason to prefer real traces is that
 a student will happily learn the generator, score wonderfully, and fall over on real traffic.
 
@@ -66,7 +66,7 @@ where only one qualifies, a billing question with nothing refundable behind it.
 | `support-holdout-v1` | 36 | new instances of scenarios the student trained on |
 | `support-unseen-v1` | 80 | four scenario shapes held out of training entirely |
 
-The unseen set scores lower (66% vs 92% for the solver), and that is the point: it is the number that says
+The unseen set scores lower (66% vs 92% for the scripted teacher), and that is the point: it is the number that says
 whether anything generalized rather than being memorized. Report both.
 
 Both eval sets are frozen. They do not change until there is a v1.0 tag — rotating an eval set makes trends

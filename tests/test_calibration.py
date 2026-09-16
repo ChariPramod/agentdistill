@@ -17,6 +17,7 @@ from agentdistill.eval.calibration import (
     build_judge_prompt,
     calibrate_judge,
     corrected_rate,
+    holdout_error,
     make_llm_judge,
     report_line,
     trajectory_summary,
@@ -90,11 +91,64 @@ def test_all_positive_truth_gives_no_false_positive_rate():
 
 
 @pytest.mark.parametrize("seed", range(5))
-def test_correction_recovers_the_true_rate_exactly(seed):
-    """Rogan-Gladen is exact in-sample: correcting the judge's own rate must return the truth rate."""
+def test_correction_inverts_exactly_in_sample(seed):
+    """Rogan-Gladen inverts exactly when applied to the set its rates were estimated on.
+
+    This is arithmetic, not evidence: the error is zero by construction however bad the judge is. It is kept as
+    a sanity check that the formula is implemented right. `test_correction_on_a_disjoint_split` is the test that
+    says anything about whether the correction generalizes.
+    """
     truth = truth_set(seed=seed)
     cal = calibrate_judge(biased_judge(truth, fpr=0.3, fnr=0.1, seed=seed), truth)
     assert corrected_rate(cal.judge_positive_rate, cal) == pytest.approx(cal.truth_positive_rate, abs=1e-9)
+
+
+def test_correction_on_a_disjoint_split_beats_no_correction():
+    """The claim that matters: fitted on one split, applied to another, it is closer to truth than the raw rate."""
+    truth = truth_set(n=1200, seed=3)
+    judge = biased_judge(truth, fpr=0.35, fnr=0.05, seed=3)
+    h = holdout_error(judge, truth, iters=800)
+    assert h["error"] is not None
+    assert abs(h["error"]) < abs(h["uncorrected_error"]), (
+        f"corrected error {h['error']:+.3f} is no better than uncorrected {h['uncorrected_error']:+.3f}"
+    )
+
+
+def test_holdout_error_reports_an_interval():
+    truth = truth_set(n=600, seed=4)
+    h = holdout_error(biased_judge(truth, fpr=0.3, fnr=0.1, seed=4), truth, iters=500)
+    lo, hi = h["error_ci95"]
+    assert lo < hi
+    assert h["n_fit"] + h["n_holdout"] == 600
+    assert not h["wide_interval"]
+
+
+def test_holdout_error_warns_on_a_small_labelled_set():
+    truth = truth_set(n=80, seed=5)
+    h = holdout_error(biased_judge(truth, fpr=0.3, fnr=0.1, seed=5), truth, iters=200)
+    assert h["wide_interval"]
+    assert "not well established" in h["note"]
+
+
+def test_holdout_error_refuses_a_set_too_small_to_split():
+    truth = truth_set(n=20, seed=6)
+    h = holdout_error(biased_judge(truth, 0.3, 0.1, seed=6), truth)
+    assert h["error"] is None
+    assert "disjoint split needs" in h["note"]
+
+
+def test_holdout_error_rejects_mismatched_lengths():
+    with pytest.raises(ValueError, match="verdicts for"):
+        holdout_error([True], [True, False])
+
+
+def test_report_line_includes_the_holdout_check():
+    truth = truth_set(n=600, seed=7)
+    judge = biased_judge(truth, fpr=0.3, fnr=0.1, seed=7)
+    cal = calibrate_judge(judge, truth)
+    line = report_line(cal.judge_positive_rate, cal, holdout_error(judge, truth, iters=300))
+    assert "holdout check" in line
+    assert "uncorrected would be" in line, "the reader must be able to see whether correcting helped"
 
 
 def test_correction_moves_a_generous_judge_downward():

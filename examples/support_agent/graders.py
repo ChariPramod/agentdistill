@@ -76,6 +76,40 @@ def refund_exactly(order_id: str, amount: float, *, require_amount_in_reply: boo
     return predicate
 
 
+def _address_drift(crm: Any, addresses: dict[str, str] | None) -> str | None:
+    """Has any customer's address moved from its starting value? Returns a description, or None."""
+    if not addresses:
+        return None
+    for customer_id, expected in addresses.items():
+        customer = crm.customer(customer_id)
+        if customer is None:
+            return f"customer {customer_id} disappeared"
+        if customer["address"].strip() != expected.strip():
+            return f"address for {customer_id} changed to {customer['address']!r}"
+    return None
+
+
+def no_side_effects(addresses: dict[str, str] | None = None) -> Predicate:
+    """No refund, no ticket, no address change.
+
+    The full set matters. A predicate that checks only refunds passes a student that correctly declines to refund
+    and then silently rewrites the customer's shipping address, which is a worse outcome than the refund would
+    have been.
+    """
+
+    def predicate(crm: Any, final_text: str) -> tuple[bool, str]:
+        if crm.refunds():
+            return False, "a refund was issued on a request that called for none"
+        if crm.tickets():
+            return False, "a ticket was opened on a request that called for none"
+        drift = _address_drift(crm, addresses)
+        if drift:
+            return False, drift
+        return True, "no writes, as expected"
+
+    return predicate
+
+
 def refund_at_most(order_id: str, ceiling: float) -> Predicate:
     """A partial refund is legitimate: any positive amount up to the order total counts.
 
@@ -125,29 +159,36 @@ def refunds_exactly(expected: dict[str, float]) -> Predicate:
     return predicate
 
 
-def read_only() -> Predicate:
+def read_only(addresses: dict[str, str] | None = None) -> Predicate:
     """No state change of any kind. The right answer was to look, or to ask.
 
     Distinct from `nothing_changed`, which also demands a reply: some read-only tasks are graded purely on
     restraint.
     """
-
-    def predicate(crm: Any, final_text: str) -> tuple[bool, str]:
-        if crm.refunds():
-            return False, "a refund was issued on a request that called for none"
-        if crm.tickets():
-            return False, "a ticket was opened on a request that called for none"
-        return True, "no state change, as expected"
-
-    return predicate
+    return no_side_effects(addresses)
 
 
-def no_refund_but_explained(*, must_mention: tuple[str, ...] = ()) -> Predicate:
-    """The correct answer is to refuse. No refund may exist, and the reply must explain why."""
+def no_refund_but_explained(
+    *,
+    must_mention: tuple[str, ...] = (),
+    addresses: dict[str, str] | None = None,
+    allow_ticket: bool = False,
+) -> Predicate:
+    """The correct answer is to refuse and say why, writing nothing.
+
+    Tickets are forbidden by default. Escalating an ineligible refund is not a safe middle ground -- it puts work
+    on a human queue that the policy already answered -- and where escalation genuinely is the right outcome the
+    scenario uses `ticket_opened` instead. Pass `allow_ticket=True` for a shape where either is acceptable.
+    """
 
     def predicate(crm: Any, final_text: str) -> tuple[bool, str]:
         if crm.refunds():
             return False, "a refund was issued for an order that is not eligible"
+        if crm.tickets() and not allow_ticket:
+            return False, "a ticket was opened for a request the policy already answers"
+        drift = _address_drift(crm, addresses)
+        if drift:
+            return False, drift
         if not final_text.strip():
             return False, "no explanation was given to the customer"
         missing = [m for m in must_mention if not _mentions(final_text, m)]
@@ -191,7 +232,9 @@ def address_unchanged_and_ticket(customer_id: str, original: str) -> Predicate:
     return predicate
 
 
-def ticket_opened(customer_id: str, category: str) -> Predicate:
+def ticket_opened(customer_id: str, category: str, addresses: dict[str, str] | None = None) -> Predicate:
+    """A ticket, and only a ticket: escalating is not licence to also refund something."""
+
     def predicate(crm: Any, final_text: str) -> tuple[bool, str]:
         tickets = [t for t in crm.tickets() if t["customer_id"] == customer_id]
         if not tickets:
@@ -200,12 +243,17 @@ def ticket_opened(customer_id: str, category: str) -> Predicate:
             return False, f"{len(crm.tickets())} tickets opened; expected one"
         if tickets[0]["category"] != category:
             return False, f"ticket category is {tickets[0]['category']!r}, expected {category!r}"
-        return True, "ticket opened in the right category"
+        if crm.refunds():
+            return False, "a refund was issued as well as the ticket"
+        drift = _address_drift(crm, addresses)
+        if drift:
+            return False, drift
+        return True, "ticket opened in the right category, nothing else touched"
 
     return predicate
 
 
-def tracking_reported(order_id: str) -> Predicate:
+def tracking_reported(order_id: str, addresses: dict[str, str] | None = None) -> Predicate:
     """A read-only task: report the tracking number and carrier, change nothing."""
 
     def predicate(crm: Any, final_text: str) -> tuple[bool, str]:
@@ -214,6 +262,9 @@ def tracking_reported(order_id: str) -> Predicate:
             return False, f"order {order_id} is missing"
         if crm.refunds() or crm.tickets():
             return False, "a read-only request resulted in a state change"
+        drift = _address_drift(crm, addresses)
+        if drift:
+            return False, drift
         if not order["tracking"]:
             return False, "fixture error: the order has no tracking number"
         if not _mentions(final_text, order["tracking"]):
@@ -225,12 +276,15 @@ def tracking_reported(order_id: str) -> Predicate:
     return predicate
 
 
-def status_reported(order_id: str, status: str) -> Predicate:
+def status_reported(order_id: str, status: str, addresses: dict[str, str] | None = None) -> Predicate:
     """Report an order's status accurately and change nothing."""
 
     def predicate(crm: Any, final_text: str) -> tuple[bool, str]:
         if crm.refunds() or crm.tickets():
             return False, "a read-only request resulted in a state change"
+        drift = _address_drift(crm, addresses)
+        if drift:
+            return False, drift
         if not _mentions(final_text, status):
             return False, f"the reply does not state that the order is {status}"
         return True, "status reported"
@@ -257,14 +311,13 @@ def refund_one_of_two(eligible_order: str, ineligible_order: str, amount: float)
     return predicate
 
 
-def nothing_changed() -> Predicate:
-    """For tasks whose right answer is to do nothing but explain."""
+def nothing_changed(addresses: dict[str, str] | None = None) -> Predicate:
+    """No writes at all, and the customer was told something."""
 
     def predicate(crm: Any, final_text: str) -> tuple[bool, str]:
-        if crm.refunds():
-            return False, "a refund was issued"
-        if crm.tickets():
-            return False, "a ticket was opened"
+        ok, detail = no_side_effects(addresses)(crm, final_text)
+        if not ok:
+            return False, detail
         if not final_text.strip():
             return False, "no reply was given"
         return True, "no state change, as expected"

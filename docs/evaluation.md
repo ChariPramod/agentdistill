@@ -79,6 +79,10 @@ Python's per-process-randomized `hash()`, which made every rebuilt state differ 
 
 ### Judge grading
 
+**This is a secondary path.** The example project grades with predicates — pure functions of the final state,
+with no model in the loop — and `eval run` never silently falls back to a judge when a predicate is configured.
+Judge grading exists for projects that have no state to check. If you have state, check it.
+
 A judge is a measuring instrument with its own error rate, and that rate is rarely symmetric: most judges call a
 mediocre trajectory a success far more readily than they call a good one a failure. A raw judge score therefore
 carries a bias that propagates into everything downstream.
@@ -103,6 +107,20 @@ Two refusals are deliberate. Below 30 labelled items no correction is applied, b
 presented as precision. And if the judge is near-random (sensitivity + specificity ≤ 1) the correction is
 undefined and says so rather than producing a number. With no calibration at all, the line reads `UNCALIBRATED`
 and states that the score should not be compared against anything.
+
+**The holdout check is the one that means something.** Estimating the judge's error rates on a set and then
+correcting that same set's rate is a tautology: Rogan-Gladen inverts exactly, so the error is zero by
+construction however bad the judge is. `calibrate-judge` therefore also fits on one split and corrects a disjoint
+one, and reports that error with a bootstrap interval next to what the uncorrected rate would have been:
+
+```
+holdout check: correcting a disjoint split lands +6.9% from truth [95% CI -0.4%, +14.1%] on n=200
+               (uncorrected would be +8.0%)
+```
+
+Read those two numbers together. If the corrected error is not clearly smaller than the uncorrected one, the
+correction is not buying anything. Below 100 labelled items the interval is wide enough that it usually is not,
+and the output says so.
 
 A judge that returns unparseable output is recorded as `judge_error`, not as a task failure — failing closed
 would bias the score downward and hide that the instrument broke.

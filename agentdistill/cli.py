@@ -853,7 +853,12 @@ def eval_calibrate_judge(
     mediocre trajectory a success far more readily than they call a good one a failure. Without this, that bias
     sits inside every number the judge produces.
     """
-    from agentdistill.eval.calibration import MIN_CALIBRATION_ITEMS, calibrate_judge, report_line
+    from agentdistill.eval.calibration import (
+        MIN_CALIBRATION_ITEMS,
+        calibrate_judge,
+        holdout_error,
+        report_line,
+    )
 
     cfg = _load(config)
     reg = _registry(cfg)
@@ -869,11 +874,14 @@ def eval_calibrate_judge(
         err.print("[red]the two runs share no task/repeat pairs[/red]; they must cover the same items.")
         raise typer.Exit(code=1)
 
+    judge_labels = [judged[k] for k in shared]
+    truth_labels = [truth[k] for k in shared]
     cal = calibrate_judge(
-        [judged[k] for k in shared], [truth[k] for k in shared],
+        judge_labels, truth_labels,
         judge_model=cfg.eval.grader.judge_model or "", rubric=cfg.eval.grader.rubric or "",
     )
-    console.print(report_line(cal.judge_positive_rate, cal))
+    holdout = holdout_error(judge_labels, truth_labels)
+    console.print(report_line(cal.judge_positive_rate, cal, holdout))
     if not cal.usable:
         console.print(
             f"[yellow]only {cal.n} labelled items; {MIN_CALIBRATION_ITEMS} are needed before a correction is "
@@ -881,6 +889,8 @@ def eval_calibrate_judge(
         )
     path = Path(out) if out else cfg.artifacts_dir / "calibration" / f"judge-{a['id'][:10]}.json"
     cal.save(path)
+    # The holdout check is what says whether the correction generalizes, so it ships beside the calibration.
+    Path(str(path).replace(".json", "-holdout.json")).write_text(json.dumps(holdout, indent=2, sort_keys=True))
     console.print(f"[green]wrote[/green] {path}")
 
 

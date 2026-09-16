@@ -23,6 +23,9 @@ import numpy as np
 #: Below this many labelled items, a correction is noise. The report says "uncalibrated" instead.
 MIN_CALIBRATION_ITEMS = 30
 
+#: Below this, the holdout error's interval is so wide it cannot rule out a useless correction. Warn loudly.
+NARROW_CI_ITEMS = 100
+
 
 @dataclass
 class JudgeCalibration:
@@ -111,6 +114,76 @@ def calibrate_judge(
     )
 
 
+def holdout_error(
+    judge: list[bool], truth: list[bool], split: float = 0.5, iters: int = 2000, seed: int = 0
+) -> dict:
+    """How wrong the correction is on data it was not fitted to.
+
+    The in-sample check -- estimate sensitivity and specificity on a set, then correct that same set's rate -- is
+    a tautology: Rogan-Gladen inverts exactly, so the error is zero by construction no matter how bad the judge
+    is. It says nothing about whether the correction generalizes.
+
+    This fits on one split and applies the correction to a disjoint one, so the reported error reflects the
+    sampling noise in the error-rate estimates. The bootstrap resamples the holdout to give that error an
+    interval.
+    """
+    if len(judge) != len(truth):
+        raise ValueError(f"judge has {len(judge)} verdicts for {len(truth)} labelled items")
+    n = len(judge)
+    if n < 2 * MIN_CALIBRATION_ITEMS:
+        return {
+            "n_fit": 0, "n_holdout": 0, "error": None,
+            "note": (
+                f"only {n} labelled items; a disjoint split needs at least {2 * MIN_CALIBRATION_ITEMS} "
+                f"for either half to support an estimate"
+            ),
+        }
+
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(n)
+    cut = int(n * split)
+    fit_idx, hold_idx = order[:cut], order[cut:]
+
+    j = np.array(judge, dtype=bool)
+    t = np.array(truth, dtype=bool)
+    fitted = calibrate_judge(j[fit_idx].tolist(), t[fit_idx].tolist())
+
+    observed_holdout = float(j[hold_idx].mean())
+    truth_holdout = float(t[hold_idx].mean())
+    corrected = corrected_rate(observed_holdout, fitted)
+    if corrected is None:
+        return {
+            "n_fit": len(fit_idx), "n_holdout": len(hold_idx), "error": None,
+            "note": "the fitted correction is undefined (the judge is near-random on the fit split)",
+        }
+
+    # Bootstrap the holdout to put an interval on the error.
+    errors = []
+    for _ in range(iters):
+        pick = rng.integers(0, len(hold_idx), size=len(hold_idx))
+        sub = hold_idx[pick]
+        c = corrected_rate(float(j[sub].mean()), fitted)
+        if c is not None:
+            errors.append(c - float(t[sub].mean()))
+    lo, hi = (float(np.percentile(errors, 2.5)), float(np.percentile(errors, 97.5))) if errors else (float("nan"),) * 2
+
+    return {
+        "n_fit": len(fit_idx),
+        "n_holdout": len(hold_idx),
+        "observed": observed_holdout,
+        "corrected": corrected,
+        "truth": truth_holdout,
+        "error": corrected - truth_holdout,
+        "error_ci95": [lo, hi],
+        "uncorrected_error": observed_holdout - truth_holdout,
+        "wide_interval": n < NARROW_CI_ITEMS,
+        "note": (
+            f"fewer than {NARROW_CI_ITEMS} labelled items, so this interval is wide and the correction is not "
+            f"well established"
+        ) if n < NARROW_CI_ITEMS else "",
+    }
+
+
 def corrected_rate(observed: float, cal: JudgeCalibration) -> float | None:
     """Rogan-Gladen correction: recover the true rate from a judge's observed rate.
 
@@ -130,7 +203,7 @@ def corrected_rate(observed: float, cal: JudgeCalibration) -> float | None:
     return float(min(max(corrected, 0.0), 1.0))
 
 
-def report_line(observed: float, cal: JudgeCalibration | None) -> str:
+def report_line(observed: float, cal: JudgeCalibration | None, holdout: dict | None = None) -> str:
     """The one line a judge-graded number is allowed to appear on.
 
     There is no code path that prints a judge score without this context, which is the point.
@@ -150,11 +223,24 @@ def report_line(observed: float, cal: JudgeCalibration | None) -> str:
         f"corrected {corrected:.1%}" if corrected is not None
         else "correction undefined (the judge is near-random)"
     )
-    return (
+    line = (
         f"judge success {observed:.1%}  ({corrected_text}; agreement {cal.agreement:.1%} on n={cal.n}, "
         f"false-positive {cal.false_positive_rate:.1%}, false-negative {cal.false_negative_rate:.1%}, "
         f"bias {cal.bias:+.1%})"
     )
+    if holdout:
+        if holdout.get("error") is None:
+            line += f"\n  holdout check: {holdout.get('note', 'unavailable')}"
+        else:
+            lo, hi = holdout["error_ci95"]
+            line += (
+                f"\n  holdout check: correcting a disjoint split lands {holdout['error']:+.1%} from truth "
+                f"[95% CI {lo:+.1%}, {hi:+.1%}] on n={holdout['n_holdout']} "
+                f"(uncorrected would be {holdout['uncorrected_error']:+.1%})"
+            )
+            if holdout.get("wide_interval"):
+                line += f"\n  WARNING: {holdout.get('note')}"
+    return line
 
 
 @dataclass

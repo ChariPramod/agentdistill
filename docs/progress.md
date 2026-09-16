@@ -8,7 +8,7 @@ What is built, what is measured, and every place the code deliberately differs f
 |---|---|
 | M1 — ingest, curate, dataset | **done** |
 | M2 — SFT | **code complete, unmeasured.** No GPU run; no throughput or next-action number exists. |
-| M2.5 — example agent | **built and tested.** Corpus recorded from a scripted solver, not a teacher. |
+| M2.5 — example agent | **built and tested.** Corpus recorded from a scripted teacher, not a teacher. |
 | M3 — eval harness | **done.** Control test passes; `eval run` / `compare` / `show` work end to end. Judge grading is calibrated. |
 | M4 — on-policy | bridge built (`eval/rollouts.py`); the round loop and DPO trainer are not |
 | M5–M8 | not started; those commands exit 2 naming their milestone |
@@ -104,12 +104,12 @@ eval number involving a tracking number.
 ## Where the example corpus falls short of the plan
 
 The plan asks for 40 scenarios × 10 instances recorded from a real teacher. What exists is **40 scenario shapes ×
-15 instances = 600 tasks**, recorded from a rule-based solver.
+15 instances = 600 tasks**, recorded from a rule-based teacher.
 
 - **The shape count and volume now meet the plan.** 40 shapes, 600 tasks, 408 training traces, 296 kept after
   curation (the plan's bar was 250), and two frozen eval sets. Solver success is 84%, inside the plan's 60–90%
   band.
-- **A scripted solver, not a teacher.** `scripted_teacher.py` reacts to real tool results from a real stateful
+- **A scripted teacher, not a teacher.** `scripted_teacher.py` reacts to real tool results from a real stateful
   database, so trajectories have the right shape — but it is a generator, and the plan is right that a student
   would learn the generator. These traces are for exercising the pipeline. **They must not be trained on or used
   to publish a number.**

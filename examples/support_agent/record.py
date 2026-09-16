@@ -132,9 +132,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default=None, help="Any LiteLLM model id, e.g. openai/gpt-4.1.")
     ap.add_argument("--scripted", action="store_true",
-                    help="Use the rule-based solver. No API key. NOT training data.")
+                    help="Use the rule-based teacher. No API key. NOT training data.")
     ap.add_argument("--error-rate", type=float, default=0.15,
-                    help="Scripted solver only: how often it takes a wrong action, so the corpus has failures.")
+                    help="Scripted teacher only: how often it takes a wrong action, so the corpus has failures.")
     ap.add_argument("--n", type=int, default=60, help="Number of tasks.")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", type=Path, default=HERE / "traces.jsonl")
@@ -147,13 +147,13 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("pass --model <litellm-model-id>, or --scripted to run without a teacher")
 
     completion = None
-    model = args.model or "scripted/rule-based-solver"
+    model = args.model or "scripted/rule-based-teacher"
     if args.scripted:
         from examples.support_agent.scripted_teacher import ScriptedTeacher
 
         completion = ScriptedTeacher(error_rate=args.error_rate, seed=args.seed)
         print(
-            "Using the scripted solver. These traces exercise the pipeline; they are NOT a teacher's traces and "
+            "Using the scripted teacher. These traces exercise the pipeline; they are NOT a teacher's traces and "
             "must not be used to train a student or to publish a number.",
             file=sys.stderr,
         )

@@ -1,9 +1,9 @@
-"""A deterministic, rule-based solver that drives the real agent loop.
+"""A deterministic, rule-based teacher that drives the real agent loop.
 
 **This is not a teacher and its traces are not training data.** The next-phase plan is explicit about why
 generated traces are worthless for distillation: an 8B student will learn the generator, every number computed on
 them will look wonderful, and the first person to run the pipeline on real traffic gets a student that falls over.
-A rule-based solver is a generator.
+A rule-based teacher is a generator.
 
 What it is for: exercising the whole chain -- CRM state, tool refusals, predicates, ingest, curation, the replay
 harness -- without an API key or a network call. It reacts to real tool results from a real stateful database, so

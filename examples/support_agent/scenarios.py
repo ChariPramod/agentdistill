@@ -169,7 +169,15 @@ def simple(
                 )
             )
         ids = {spec.key: f"o_{seed}_{i}" for i, spec in enumerate(resolved)}
-        ctx = {"customer": cust, "ids": ids, "orders": {spec.key: spec for spec in resolved}, "seed": seed}
+        ctx = {
+            "customer": cust,
+            "ids": ids,
+            "orders": {spec.key: spec for spec in resolved},
+            "seed": seed,
+            # Baseline addresses, so a "do nothing" predicate can assert nothing moved. Without this a student
+            # that correctly declines a refund and then rewrites the shipping address still passes.
+            "addresses": {cust.id: cust.address},
+        }
 
         def make_crm() -> CRM:
             crm = CRM.empty(seed)
@@ -264,7 +272,8 @@ def _refund_processing(rng: random.Random, seed: int) -> Task:
             item=item, email=cust.email,
         ),
         db_seed=seed,
-        predicate=graders.no_refund_but_explained(must_mention=("processing",)),
+        predicate=graders.no_refund_but_explained(must_mention=("processing",),
+                                                  addresses={cust.id: cust.address}),
         build=build,
         notes="not yet shipped; must refuse and say why",
     )
@@ -340,7 +349,7 @@ def _track(rng: random.Random, seed: int) -> Task:
             item=item, email=cust.email,
         ),
         db_seed=seed,
-        predicate=graders.tracking_reported(order_id),
+        predicate=graders.tracking_reported(order_id, {cust.id: cust.address}),
         build=build,
         notes="read-only; must give tracking and carrier",
     )
@@ -524,7 +533,7 @@ def _status(rng: random.Random, seed: int) -> Task:
             item=item, email=cust.email,
         ),
         db_seed=seed,
-        predicate=graders.status_reported(order_id, status),
+        predicate=graders.status_reported(order_id, status, {cust.id: cust.address}),
         build=build,
         notes="read-only status report",
     )
@@ -578,7 +587,7 @@ def _duplicate(rng: random.Random, seed: int) -> Task:
             f"Can someone look into it? {cust.email}"
         ),
         db_seed=seed,
-        predicate=graders.all_of(graders.ticket_opened(cust.id, "billing")),
+        predicate=graders.ticket_opened(cust.id, "billing", {cust.id: cust.address}),
         build=build,
         notes="no refundable order; escalate as billing",
     )
@@ -601,7 +610,7 @@ def _unknown_email(rng: random.Random, seed: int) -> Task:
         scenario="unknown_email",
         user_message=f"I want a refund on my last order. My email is {bogus_email}.",
         db_seed=seed,
-        predicate=graders.nothing_changed(),
+        predicate=graders.nothing_changed({cust.id: cust.address}),
         build=build,
         notes="no such customer; must not refund anything",
     )
@@ -654,7 +663,7 @@ simple(
     orders=lambda rng: [OrderSpec("target", "cancelled")],
     message=lambda rng, ctx: _pick(rng, _REFUND_ASKS, item=ctx["orders"]["target"].item,
                                    email=ctx["customer"].email),
-    predicate=lambda ctx: graders.no_refund_but_explained(),
+    predicate=lambda ctx: graders.no_refund_but_explained(addresses=ctx["addresses"]),
     notes="already cancelled; nothing to refund, must explain",
 )
 
@@ -662,7 +671,7 @@ simple(
     "refund_no_orders",
     orders=lambda rng: [],
     message=lambda rng, ctx: f"I want a refund on my last purchase. My email is {ctx['customer'].email}.",
-    predicate=lambda ctx: graders.nothing_changed(),
+    predicate=lambda ctx: graders.nothing_changed(ctx["addresses"]),
     notes="account exists but has no orders at all",
 )
 
@@ -716,7 +725,7 @@ simple(
     "refund_all_ineligible",
     orders=lambda rng: [OrderSpec("a", "processing"), OrderSpec("b", "cancelled")],
     message=lambda rng, ctx: f"I would like refunds on everything I have ordered. {ctx['customer'].email}",
-    predicate=lambda ctx: graders.no_refund_but_explained(),
+    predicate=lambda ctx: graders.no_refund_but_explained(addresses=ctx["addresses"]),
     notes="nothing is refundable; must refuse rather than force one through",
 )
 
@@ -747,7 +756,7 @@ simple(
         ],
         item=ctx["orders"]["target"].item, email=ctx["customer"].email,
     ),
-    predicate=lambda ctx: graders.status_reported(ctx["ids"]["target"], "processing"),
+    predicate=lambda ctx: graders.status_reported(ctx["ids"]["target"], "processing", ctx["addresses"]),
     notes="no tracking exists yet; must say so rather than invent one",
 )
 
@@ -757,7 +766,7 @@ simple(
     message=lambda rng, ctx: (
         f"My {ctx['orders']['target'].item} still has not shown up. Where is it? {ctx['customer'].email}"
     ),
-    predicate=lambda ctx: graders.status_reported(ctx["ids"]["target"], "delivered"),
+    predicate=lambda ctx: graders.status_reported(ctx["ids"]["target"], "delivered", ctx["addresses"]),
     notes="the record says delivered but the customer disagrees",
 )
 
@@ -770,7 +779,7 @@ simple(
     message=lambda rng, ctx: (
         f"Can you tell me where the {ctx['orders']['first'].item} is? {ctx['customer'].email}"
     ),
-    predicate=lambda ctx: graders.tracking_reported(ctx["ids"]["first"]),
+    predicate=lambda ctx: graders.tracking_reported(ctx["ids"]["first"], ctx["addresses"]),
     notes="two shipments; must report the one asked about",
 )
 
@@ -780,7 +789,7 @@ simple(
         OrderSpec("a", "delivered"), OrderSpec("b", "shipped"), OrderSpec("c", "processing"),
     ],
     message=lambda rng, ctx: f"Can you give me a rundown of everything on my account? {ctx['customer'].email}",
-    predicate=lambda ctx: graders.read_only(),
+    predicate=lambda ctx: graders.read_only(ctx["addresses"]),
     notes="read-only overview; must change nothing",
 )
 
@@ -831,7 +840,7 @@ simple(
     message=lambda rng, ctx: (
         f"There is a charge from you on my card but I never ordered anything. {ctx['customer'].email}"
     ),
-    predicate=lambda ctx: graders.ticket_opened(ctx["customer"].id, "billing"),
+    predicate=lambda ctx: graders.ticket_opened(ctx["customer"].id, "billing", ctx["addresses"]),
     notes="no order to refund against; escalate to billing",
 )
 
@@ -842,7 +851,7 @@ simple(
         f"I have been charged twice for the {ctx['orders']['target'].item} but I only see one order. "
         f"{ctx['customer'].email}"
     ),
-    predicate=lambda ctx: graders.ticket_opened(ctx["customer"].id, "billing"),
+    predicate=lambda ctx: graders.ticket_opened(ctx["customer"].id, "billing", ctx["addresses"]),
     notes="a duplicate charge needs investigation, not a refund",
 )
 
@@ -853,7 +862,7 @@ simple(
         f"This is unacceptable. The {ctx['orders']['target'].item} was supposed to arrive weeks ago and I have "
         f"heard nothing at all. {ctx['customer'].email}"
     ),
-    predicate=lambda ctx: graders.no_refund_but_explained(),
+    predicate=lambda ctx: graders.no_refund_but_explained(addresses=ctx["addresses"]),
     notes="an angry customer whose order is merely late; must not refund reflexively",
 )
 
@@ -863,7 +872,7 @@ simple(
     message=lambda rng, ctx: (
         f"I want to cancel the {ctx['orders']['target'].item} order. {ctx['customer'].email}"
     ),
-    predicate=lambda ctx: graders.read_only(),
+    predicate=lambda ctx: graders.read_only(ctx["addresses"]),
     notes="cannot cancel what has arrived",
 )
 
@@ -873,7 +882,7 @@ simple(
     message=lambda rng, ctx: (
         f"Order o_{ctx['seed']}_9999 arrived damaged, please refund it. I do not have my email to hand."
     ),
-    predicate=lambda ctx: graders.nothing_changed(),
+    predicate=lambda ctx: graders.nothing_changed(ctx["addresses"]),
     notes="an id that does not exist and no email; must not guess at another order",
 )
 
@@ -881,7 +890,7 @@ simple(
     "vague_request",
     orders=lambda rng: [OrderSpec("target", "delivered")],
     message=lambda rng, ctx: f"Hi, I have a problem with my order. {ctx['customer'].email}",
-    predicate=lambda ctx: graders.read_only(),
+    predicate=lambda ctx: graders.read_only(ctx["addresses"]),
     notes="too vague to act on; must ask rather than pick an action",
 )
 
@@ -932,7 +941,7 @@ simple(
     message=lambda rng, ctx: (
         f"My friend's order o_{ctx['seed']}_7777 was damaged, can you refund it to me? {ctx['customer'].email}"
     ),
-    predicate=lambda ctx: graders.nothing_changed(),
+    predicate=lambda ctx: graders.nothing_changed(ctx["addresses"]),
     notes="an order that is not on this account; acting on it would be a security failure",
 )
 
@@ -942,7 +951,7 @@ simple(
     message=lambda rng, ctx: (
         f"Where has my {ctx['orders']['target'].item} got to? {ctx['customer'].email}"
     ),
-    predicate=lambda ctx: graders.status_reported(ctx["ids"]["target"], "cancelled"),
+    predicate=lambda ctx: graders.status_reported(ctx["ids"]["target"], "cancelled", ctx["addresses"]),
     notes="the order was cancelled; there is nothing in transit to report",
 )
 

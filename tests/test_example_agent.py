@@ -383,9 +383,101 @@ def test_summarize_empty():
     assert summarize([])["n"] == 0
 
 
-def test_scripted_solver_produces_both_outcomes():
+def test_scripted_teacher_produces_both_outcomes():
     """Without failures there are no DPO pairs and the outcome filter has nothing to drop."""
     tasks = scenarios.sample(40, seed=33)
     teacher = ScriptedTeacher(error_rate=0.3, seed=1)
     outcomes = {record_one(t, "scripted", completion=teacher)["success"] for t in tasks}
     assert outcomes == {True, False}
+
+
+# --------------------------------------------------------------------------------------------------------------
+# refusal predicates must assert zero writes
+#
+# A predicate that only checks the final message passes a student that does the wrong thing and then apologizes
+# for it. Every "do nothing" shape asserts no refund, no ticket, and no address change.
+# --------------------------------------------------------------------------------------------------------------
+
+
+def test_no_side_effects_catches_each_kind_of_write(crm):
+    baseline = {"c_1": crm.customer("c_1")["address"]}
+    predicate = graders.no_side_effects(baseline)
+    assert predicate(crm, "I could not help with that.")[0]
+
+    crm.call("create_ticket", {"customer_id": "c_1", "category": "other", "summary": "x"})
+    ok, detail = predicate(crm, "I could not help.")
+    assert not ok and "ticket" in detail
+
+
+def test_no_side_effects_catches_a_silent_address_change(crm):
+    """The gap this closes: refusing correctly and then rewriting the address is worse than the refusal."""
+    baseline = {"c_1": crm.customer("c_1")["address"]}
+    crm.call("update_address", {"customer_id": "c_1", "address": "99 Somewhere Else"})
+    ok, detail = graders.no_side_effects(baseline)(crm, "I cannot refund that order.")
+    assert not ok
+    assert "address" in detail
+
+
+def test_refusal_predicate_catches_a_refund_plus_apology(crm):
+    """A student that refunds an ineligible order and apologizes must not pass."""
+    predicate = graders.no_refund_but_explained(must_mention=("processing",),
+                                                addresses={"c_1": crm.customer("c_1")["address"]})
+    assert predicate(crm, "That order is still processing, so I cannot refund it.")[0]
+    crm.call("issue_refund", {"order_id": "o_1", "amount": 100.0, "reason": "damaged"})
+    ok, _ = predicate(crm, "That order is still processing, so I cannot refund it. Sorry for the trouble!")
+    assert not ok
+
+
+def test_refusal_predicate_catches_a_stray_address_change(crm):
+    predicate = graders.no_refund_but_explained(addresses={"c_1": crm.customer("c_1")["address"]})
+    crm.call("update_address", {"customer_id": "c_1", "address": "somewhere new"})
+    ok, detail = predicate(crm, "I cannot refund that.")
+    assert not ok and "address" in detail
+
+
+def test_ticket_predicate_rejects_a_refund_alongside_the_ticket(crm):
+    predicate = graders.ticket_opened("c_1", "billing", {"c_1": crm.customer("c_1")["address"]})
+    crm.call("create_ticket", {"customer_id": "c_1", "category": "billing", "summary": "dupe"})
+    assert predicate(crm, "Raised with billing.")[0]
+    crm.call("issue_refund", {"order_id": "o_1", "amount": 100.0, "reason": "damaged"})
+    ok, detail = predicate(crm, "Raised with billing.")
+    assert not ok and "refund" in detail
+
+
+def test_read_only_predicates_reject_an_address_change(crm):
+    order = crm.order("o_1")
+    baseline = {"c_1": crm.customer("c_1")["address"]}
+    reply = f"It's with {order['carrier']}, tracking {order['tracking']}."
+    assert graders.tracking_reported("o_1", baseline)(crm, reply)[0]
+    crm.call("update_address", {"customer_id": "c_1", "address": "moved"})
+    ok, detail = graders.tracking_reported("o_1", baseline)(crm, reply)
+    assert not ok and "address" in detail
+
+
+def test_every_refusal_scenario_asserts_zero_writes():
+    """Audit: each shape whose right answer is restraint must fail a student that writes anything.
+
+    Driven off the scenarios themselves so a new refusal shape with a message-only predicate is caught here
+    rather than by a number that quietly looks fine.
+    """
+    refusal_notes = ("must refuse", "must not", "nothing to refund", "read-only", "change nothing",
+                     "cannot cancel", "must not guess", "must ask", "not able to act")
+    audited = 0
+    for name in sorted(scenarios.SCENARIOS):
+        task = scenarios.build_task(name, 77)
+        if not any(n in task.notes.lower() for n in refusal_notes):
+            continue
+        audited += 1
+        crm = task.fresh_crm()
+        # A student that writes something it should not: refund whatever it can, else open a ticket.
+        refundable = [o for o in crm.orders() if o["status"] in ("shipped", "delivered")
+                      and not any(r["order_id"] == o["id"] for r in crm.refunds())]
+        if refundable:
+            crm.call("issue_refund", {"order_id": refundable[0]["id"], "amount": refundable[0]["total"],
+                                      "reason": "damaged"})
+        else:
+            crm.call("create_ticket", {"customer_id": crm.customers()[0]["id"], "category": "other",
+                                       "summary": "unnecessary"})
+        ok, _ = task.predicate(crm, "All sorted for you, sorry about the trouble!")
+        assert not ok, f"{name} passes a student that wrote state it should not have"
+    assert audited >= 8, f"expected several refusal shapes to audit, found {audited}"
