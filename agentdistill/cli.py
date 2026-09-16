@@ -479,7 +479,7 @@ def train_sft_cmd(
         dataset_path, dataset_id = str(path), None
 
     try:
-        from agentdistill.train.sft import TrainingUnavailable, train_sft
+        from agentdistill.train.sft import NoSuchBaseModel, TrainingUnavailable, train_sft
     except ImportError as e:  # pragma: no cover
         err.print(f"[red]{e}[/red]")
         raise typer.Exit(code=1) from e
@@ -505,7 +505,7 @@ def train_sft_cmd(
 
     try:
         result = train_sft(train_cfg, dataset_path, out_dir)
-    except TrainingUnavailable as e:
+    except (TrainingUnavailable, NoSuchBaseModel) as e:
         if dataset_id is not None:
             reg.finish_training_run(run_id, "failed", {"error": str(e)}, None)
         err.print(f"[red]{e}[/red]")

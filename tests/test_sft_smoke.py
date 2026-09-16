@@ -280,3 +280,14 @@ def test_cli_train_on_unknown_dataset_is_a_clear_error(tmp_path, monkeypatch):
     combined = (result.stdout or "") + (result.stderr or "")
     assert result.exit_code == 1
     assert "no dataset named" in combined
+
+
+@pytest.mark.slow
+def test_tokenizer_only_base_model_gives_an_actionable_error(tiny_dataset, tmp_path):
+    """The first thing an example-follower hits: `base_model` points at a tokenizer with no weights."""
+    from agentdistill.train.sft import NoSuchBaseModel, train_sft
+
+    cfg = {"base_model": str(TOKENIZER_DIR), "quantization": None, "max_seq_len": 256, "packing": False,
+           "lora": {"r": 4, "alpha": 8, "dropout": 0.0, "target_modules": ["q_proj"]}, "report_to": []}
+    with pytest.raises(NoSuchBaseModel, match="base-check"):
+        train_sft(cfg, tiny_dataset, tmp_path / "adapter")

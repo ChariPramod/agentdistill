@@ -33,6 +33,10 @@ class TrainingUnavailable(ImportError):
     """The training extra is not installed."""
 
 
+class NoSuchBaseModel(ValueError):
+    """`train.base_model` has no loadable weights. Most often a tokenizer-only path."""
+
+
 @dataclass
 class TrainResult:
     adapter_path: str
@@ -206,12 +210,21 @@ def train_sft(cfg: dict, dataset_path: str | Path, out_dir: str | Path) -> Train
     tok = AutoTokenizer.from_pretrained(base_model)
     attn = _attn_implementation(cfg)
 
-    model = AutoModelForCausalLM.from_pretrained(
-        base_model,
-        quantization_config=build_quantization_config(cfg),
-        dtype=torch.bfloat16 if cfg.get("bf16", True) else torch.float32,
-        attn_implementation=attn,
-    )
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            base_model,
+            quantization_config=build_quantization_config(cfg),
+            dtype=torch.bfloat16 if cfg.get("bf16", True) else torch.float32,
+            attn_implementation=attn,
+        )
+    except (OSError, ValueError) as e:
+        raise NoSuchBaseModel(
+            f"could not load model weights for train.base_model={base_model!r}: {e}\n"
+            "A tokenizer alone is enough to *build* a dataset but not to train one. Point train.base_model at a "
+            "real instruct model (check it first with `agentdistill base-check <model>`), keeping in mind that "
+            "the dataset was tokenized with the tokenizer named in its manifest -- a different tokenizer means a "
+            "new dataset version."
+        ) from e
 
     train_ds, eval_ds = load_dataset_splits(dataset_path, seed=cfg.get("seed", 17))
 
