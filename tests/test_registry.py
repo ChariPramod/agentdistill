@@ -249,3 +249,38 @@ def test_an_unknown_dataset_kind_is_still_refused(tmp_path):
                                 "n_samples": 1, "n_tokens": 1, "content_hash": "h", "path": "/tmp/x"})
     finally:
         reg.close()
+
+
+def test_the_recorded_invocation_is_pasteable(monkeypatch):
+    """The report prints these under "how to reproduce". A command with an absolute path to cli.py in it is
+    something you have to edit before running, and one nobody can paste is one nobody checks."""
+    import sys
+
+    from agentdistill.registry.base import invocation
+
+    monkeypatch.setattr(
+        sys, "argv",
+        ["/Users/someone/project/.venv/lib/python3.13/site-packages/agentdistill/cli.py",
+         "train", "sft", "demo", "--config", "project.yaml"],
+    )
+    assert invocation() == "agentdistill train sft demo --config project.yaml"
+
+
+def test_a_real_console_script_invocation_is_left_alone(monkeypatch):
+    import sys
+
+    from agentdistill.registry.base import invocation
+
+    monkeypatch.setattr(sys, "argv", ["/usr/local/bin/agentdistill", "curate"])
+    assert invocation() == "agentdistill curate"
+
+
+def test_an_unrecognised_argv0_is_not_rewritten(monkeypatch):
+    """Only the known entry points are normalized. Anything else is reported as it was, because guessing would
+    make the record less true rather than more useful."""
+    import sys
+
+    from agentdistill.registry.base import invocation
+
+    monkeypatch.setattr(sys, "argv", ["/opt/wrapper.sh", "curate"])
+    assert invocation() == "/opt/wrapper.sh curate"

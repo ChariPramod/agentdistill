@@ -32,10 +32,20 @@ MIGRATION_FILES = (
 
 
 def invocation() -> str:
-    """The command that produced a row, so a report can print how to reproduce it."""
-    import sys
+    """The command that produced a row, so a report can print how to reproduce it.
 
-    return " ".join(sys.argv)
+    `argv[0]` is normalized to `agentdistill`. Run through `python -m agentdistill.cli` it is an absolute path
+    to cli.py, which makes the report's "how to reproduce" block something you have to edit before you can run
+    it -- and a reproduction command nobody can paste is not one anybody checks.
+    """
+    import sys
+    from pathlib import Path
+
+    argv = list(sys.argv) or ["agentdistill"]
+    head = Path(argv[0]).name
+    if head in ("cli.py", "__main__.py", "agentdistill", "pytest", "__main__"):
+        argv[0] = "agentdistill"
+    return " ".join(argv)
 
 
 def utcnow() -> str:
