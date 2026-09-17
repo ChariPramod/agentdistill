@@ -39,6 +39,8 @@ class RequestLog:
             "escalated": bool(meta.get("escalated", False)),
             "student_tokens": meta.get("student_tokens"),
             "teacher_tokens": meta.get("teacher_tokens"),
+            "prompt_tokens": _prompt_tokens(usage),
+            "cached_prompt_tokens": _cached_prompt_tokens(usage),
             "cost_usd": meta.get("cost_usd"),
             "latency_ms": meta.get("latency_ms"),
             "outcome": None,
@@ -60,10 +62,12 @@ class RequestLog:
                     text(
                         """INSERT INTO requests (id, received_at, cluster_id, arm, adapter_id, confidence,
                                                  escalated, student_tokens, teacher_tokens, cost_usd, latency_ms,
-                                                 outcome, trace_id, payload, fallback, fallback_reason)
+                                                 outcome, trace_id, payload, fallback, fallback_reason,
+                                                 prompt_tokens, cached_prompt_tokens)
                            VALUES (:id, :received_at, :cluster_id, :arm, :adapter_id, :confidence, :escalated,
                                    :student_tokens, :teacher_tokens, :cost_usd, :latency_ms, :outcome, :trace_id,
-                                   :payload, :fallback, :fallback_reason)"""
+                                   :payload, :fallback, :fallback_reason, :prompt_tokens,
+                                   :cached_prompt_tokens)"""
                     ),
                     params,
                 )
@@ -119,3 +123,29 @@ class RequestLog:
                 text("SELECT * FROM requests ORDER BY received_at DESC LIMIT :n"), {"n": limit}
             ).mappings().fetchall()
         return [dict(r) for r in rows]
+
+
+def _prompt_tokens(usage: dict) -> int | None:
+    """Prompt tokens from an OpenAI- or Anthropic-shaped usage block."""
+    if not usage:
+        return None
+    for key in ("prompt_tokens", "input_tokens"):
+        if usage.get(key) is not None:
+            return int(usage[key])
+    return None
+
+
+def _cached_prompt_tokens(usage: dict) -> int | None:
+    """Prompt tokens served from the provider's cache, which are billed at a lower rate.
+
+    Both dialects report this in a nested block, and the names differ; an absent block means no cache, not zero
+    cache, so this returns None rather than 0 when it cannot tell.
+    """
+    if not usage:
+        return None
+    details = usage.get("prompt_tokens_details") or {}
+    if details.get("cached_tokens") is not None:
+        return int(details["cached_tokens"])
+    if usage.get("cache_read_input_tokens") is not None:
+        return int(usage["cache_read_input_tokens"])
+    return None

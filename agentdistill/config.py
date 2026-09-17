@@ -282,7 +282,27 @@ class RouterConfig(StrictModel):
     floor: float = Field(0.55, ge=0.0, le=1.0)
     explore_cap: float = Field(0.10, ge=0.0, le=1.0)
     decay: float = Field(0.995, gt=0.0, le=1.0)
+    #: Evidence required before the floor may cut a cluster off. Below this the router keeps exploring.
+    min_observations: int = Field(10, ge=1)
     seed: int = 0
+
+    @model_validator(mode="after")
+    def _floor_is_reachable(self) -> RouterConfig:
+        """Decay caps how much evidence an arm can hold; the floor needs evidence to engage.
+
+        Caught here rather than at gateway boot, because at boot the only safe response is to serve without a
+        router, and a config that quietly disables the safety floor should fail before it reaches production.
+        """
+        if self.decay >= 1.0:
+            return self
+        ceiling = 1.0 / (1.0 - self.decay) - 2.0
+        if self.min_observations >= ceiling:
+            raise ValueError(
+                f"router.decay={self.decay} caps evidence at {ceiling:.1f} observations, so the floor at "
+                f"min_observations={self.min_observations} could never engage; raise decay or lower "
+                f"router.min_observations"
+            )
+        return self
 
 
 class ServeConfig(StrictModel):

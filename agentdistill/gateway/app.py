@@ -11,7 +11,6 @@ the Anthropic dialect) saying which arm answered and whether the gate escalated.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import time
 import uuid
@@ -31,6 +30,7 @@ from agentdistill.gateway.dialect import (
 )
 from agentdistill.gateway.resolve import UnknownModel, resolve
 from agentdistill.gateway.state import GatewayState
+from agentdistill.router.canary import use_canary
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +49,7 @@ def set_state(state: GatewayState) -> None:
 
 def _canary_for(request_id: str) -> bool:
     """Deterministic per-request split, so a retry of the same request lands on the same adapter."""
-    if not gw.canary_adapter or gw.canary_share <= 0:
-        return False
-    bucket = int(hashlib.sha256(request_id.encode()).hexdigest()[:8], 16) % 100
-    return bucket < gw.canary_share * 100
+    return use_canary(request_id, gw.canary_share, gw.canary_adapter)
 
 
 async def handle(req: dict) -> tuple[dict, dict, dict]:
@@ -235,11 +232,18 @@ async def feedback(body: dict):
     if record and record.get("fallback"):
         return {"ok": True, "request_id": request_id, "router_updated": False,
                 "note": "fallback request; neither arm's posterior was updated"}
-    if gw.router and record and record.get("cluster_id") is not None and record.get("arm") in ("student", "teacher"):
+    routable = bool(
+        gw.router and record
+        and record.get("cluster_id") is not None
+        and record.get("arm") in ("student", "teacher")
+    )
+    if routable:
         gw.router.update(record["cluster_id"], record["arm"], bool(body.get("success")))
         if getattr(gw, "router_store", None):
             gw.router_store.flush(gw.router)
-    return {"ok": True, "request_id": request_id}
+    # Always reported, not only when it is False: a caller checking whether its feedback landed should not have
+    # to infer it from the absence of a key.
+    return {"ok": True, "request_id": request_id, "router_updated": routable}
 
 
 @app.get("/healthz")

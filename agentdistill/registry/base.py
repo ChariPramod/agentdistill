@@ -17,7 +17,7 @@ from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.exc import OperationalError
 
 MIGRATIONS = Path(__file__).resolve().parent / "migrations"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 #: Migrations are applied in order; each is idempotent.
 MIGRATION_FILES = (
@@ -25,6 +25,7 @@ MIGRATION_FILES = (
     "002_eval_results.sql",
     "003_phase3.sql",
     "004_phase3c.sql",
+    "005_prompt_tokens.sql",
 )
 
 

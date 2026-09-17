@@ -31,7 +31,7 @@ class GatewayState:
     feature_names: list[str] = field(default_factory=list)
     clusters: Any = None
     router: Any = None
-    #: Persists router posteriors; set once the router lands (milestone 7).
+    #: Persists router posteriors after every feedback call.
     router_store: Any = None
     teacher_names: set[str] = field(default_factory=set)
     k_samples: int = 2
@@ -155,6 +155,8 @@ def load_state(cfg: Any, registry: Any, student: Any = None, teacher: Any = None
         state.canary_adapter = canary["name"]
         state.canary_share = cfg.serve.canary_share
 
+    _load_router(cfg, registry, state, notes)
+
     state.notes = notes
     for note in notes:
         logger.warning("gateway: %s", note)
@@ -182,3 +184,21 @@ def _load_calibration(cfg: Any, registry: Any, adapter_id: str, notes: list[str]
         notes.append(str(e))
         return None
     return model, float(row["threshold"])
+
+
+def _load_router(cfg: Any, registry: Any, state: GatewayState, notes: list[str]) -> None:
+    """Attach the router and its store.
+
+    A router failure must not stop the gateway from serving. Without a router every request takes the cascade
+    path, which is the behaviour from before the router existed -- more expensive, never wrong.
+    """
+    from agentdistill.report.cost import arm_costs
+    from agentdistill.router.store import RouterStore, load_router
+
+    try:
+        state.router = load_router(registry, cfg, cost=arm_costs(cfg, registry))
+        state.router_store = RouterStore(registry)
+    except Exception as e:  # serving without a router beats not serving
+        notes.append(f"router unavailable ({e}); every request takes the cascade path")
+        state.router = None
+        state.router_store = None

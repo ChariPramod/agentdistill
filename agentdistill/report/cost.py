@@ -76,3 +76,90 @@ def saving_fraction(teacher_task_cost: float, cascade_cost: float) -> float | No
     if not teacher_task_cost:
         return None
     return 1.0 - cascade_cost / teacher_task_cost
+
+
+def observed_token_means(registry: object, limit: int = 5000) -> dict[str, float] | None:
+    """Mean tokens per request for each arm, from the gateway's own log.
+
+    Measured rather than assumed. A token profile guessed from the config is the kind of input that makes a cost
+    model unfalsifiable; if the gateway has not served enough traffic to measure one, this returns `None` and the
+    caller says so.
+
+    Only requests that reached the teacher contribute to the teacher averages, and only requests that reached the
+    student to the student average. Averaging over all rows would divide the teacher's tokens by the student's
+    traffic and quietly make the teacher look cheap.
+    """
+    from sqlalchemy import text
+
+    with registry.engine.connect() as conn:  # type: ignore[attr-defined]
+        row = conn.execute(
+            text(
+                """SELECT
+                       AVG(CASE WHEN student_tokens IS NOT NULL THEN student_tokens END)   AS student_out,
+                       AVG(CASE WHEN teacher_tokens IS NOT NULL THEN teacher_tokens END)   AS teacher_out,
+                       AVG(CASE WHEN teacher_tokens IS NOT NULL THEN prompt_tokens END)    AS teacher_in,
+                       AVG(CASE WHEN teacher_tokens IS NOT NULL
+                                THEN CAST(cached_prompt_tokens AS REAL) / prompt_tokens END) AS cache_frac,
+                       COUNT(*)                                                            AS n,
+                       SUM(CASE WHEN teacher_tokens IS NOT NULL THEN 1 ELSE 0 END)         AS n_teacher
+                   FROM (SELECT student_tokens, teacher_tokens, prompt_tokens, cached_prompt_tokens
+                         FROM requests WHERE fallback = 0 OR fallback IS NULL
+                         ORDER BY received_at DESC LIMIT :lim) q"""
+            ),
+            {"lim": limit},
+        ).mappings().first()
+    if not row or int(row["n"] or 0) < 50 or int(row["n_teacher"] or 0) < 10:
+        return None
+    if row["teacher_in"] is None:
+        # Rows predating the prompt-token columns. Pricing the teacher on completions alone would understate it.
+        return None
+    return {
+        "student_tokens": float(row["student_out"] or 0.0),
+        "teacher_prompt_tokens": float(row["teacher_in"]),
+        "teacher_completion_tokens": float(row["teacher_out"] or 0.0),
+        "cache_hit_frac": float(row["cache_frac"] or 0.0),
+        "n": float(row["n"]),
+    }
+
+
+def arm_costs(cfg: object, registry: object | None = None) -> dict[str, float]:
+    """Dollars per request for each router arm.
+
+    The router trades success against cost at `lambda_per_usd`, so these must be real dollars or the trade is
+    meaningless. When either side cannot be priced -- no teacher prices on file, or too little traffic to measure
+    a token profile -- both arms are returned at zero, which makes the router maximize success alone. That is the
+    conservative failure: it may route to the teacher more often than a cost-aware router would, and it will
+    never route to the student for a saving that was never verified.
+    """
+    zero = {"student": 0.0, "teacher": 0.0}
+    teacher = getattr(cfg, "teacher", None)
+    serve = getattr(cfg, "serve", None)
+    if teacher is None or serve is None or registry is None:
+        return zero
+    if teacher.input_per_mtok is None or teacher.output_per_mtok is None:
+        return zero
+
+    means = observed_token_means(registry)
+    if means is None:
+        return zero
+
+    student_rate = student_cost_per_mtok(
+        serve.gpu_usd_per_hour, tokens_per_second=_tokens_per_second(serve)
+    )
+    teacher_cost = teacher_cost_per_task(
+        prompt_tokens=means["teacher_prompt_tokens"],
+        completion_tokens=means["teacher_completion_tokens"],
+        input_per_mtok=teacher.input_per_mtok,
+        output_per_mtok=teacher.output_per_mtok,
+        cache_hit_frac=means["cache_hit_frac"],
+        cache_read_per_mtok=teacher.cache_read_per_mtok,
+    )
+    return {
+        "student": means["student_tokens"] * student_rate / 1e6,
+        "teacher": teacher_cost,
+    }
+
+
+def _tokens_per_second(serve: object) -> float:
+    """Generation throughput, from config when declared and a conservative default otherwise."""
+    return float(getattr(serve, "tokens_per_second", 0.0) or 800.0)

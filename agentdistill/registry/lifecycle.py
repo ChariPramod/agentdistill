@@ -240,41 +240,30 @@ def compare_live(registry: Any, prod_id: str | None, canary_id: str, since_days:
     """Paired-by-cluster success difference from the request log.
 
     The evidence for promoting a canary to prod: not a frozen eval set, but the traffic each actually served.
-    Returns None when either side has too few graded requests to say anything.
-    """
+    Returns None when either side has too few graded requests to say anything, which the promotion check treats
+    as a failure -- "not enough live traffic" is the right answer, not a pass.
 
-    from agentdistill.eval.stats import cluster_bootstrap_diff
+    The statistics live in `router.compare_live` so that the number a promotion turns on is the same number
+    `adapter compare-live` prints. An earlier version computed its own, and differed in two ways that both
+    flattered the canary: it counted fallback requests, which the teacher actually served, and it accepted two
+    shared clusters where three is the minimum for a cluster bootstrap to mean anything.
+    """
+    from agentdistill.router.compare_live import compare_live as _compare
+    from agentdistill.router.compare_live import live_rows
 
     if not prod_id:
         return None
-    with registry.engine.connect() as conn:
-        rows = [dict(r) for r in conn.execute(
-            text(
-                """SELECT adapter_id, cluster_id, outcome FROM requests
-                   WHERE outcome IS NOT NULL AND cluster_id IS NOT NULL
-                     AND received_at >= :since"""
-            ),
-            {"since": _days_ago(since_days)},
-        ).mappings()]
-
-    by_adapter: dict[str, dict[str, list[float]]] = {}
-    for r in rows:
-        bucket = by_adapter.setdefault(str(r["adapter_id"]), {})
-        bucket.setdefault(str(r["cluster_id"]), []).append(float(bool(r["outcome"])))
-
-    a, b = by_adapter.get(canary_id, {}), by_adapter.get(prod_id, {})
-    shared = set(a) & set(b)
-    if len(shared) < 2:
-        return None
-    try:
-        cmp = cluster_bootstrap_diff({k: a[k] for k in shared}, {k: b[k] for k in shared}, iters=2000)
-    except Exception:
+    result = _compare(live_rows(registry, since=_days_ago(since_days)), prod_id, canary_id, iters=2000)
+    if result is None:
         return None
     return {
-        "delta": cmp.delta, "ci95": list(cmp.ci95), "n_clusters": cmp.n_tasks,
-        "canary_requests": int(sum(len(v) for v in a.values())),
-        "prod_requests": int(sum(len(v) for v in b.values())),
-        "note": "paired by cluster over graded requests from the log",
+        "delta": result["success"]["delta"],
+        "ci95": list(result["success"]["ci95"]),
+        "n_clusters": result["n_clusters"],
+        "canary_requests": result["n_canary"],
+        "prod_requests": result["n_prod"],
+        "per_cluster": result["per_cluster"],
+        "note": "paired by cluster over graded, non-fallback, student-routed requests from the log",
     }
 
 

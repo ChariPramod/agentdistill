@@ -1567,5 +1567,72 @@ def retrain(config: str = "project.yaml") -> None:
     _not_built("the retrain loop", "milestone 7")
 
 
+@adapter_app.command("compare-live")
+def adapter_compare_live(
+    prod: str = typer.Argument(..., help="The incumbent adapter's id or name."),
+    canary: str = typer.Argument(..., help="The challenger adapter's id or name."),
+    since: str = typer.Option("7d", help="How far back to look: 7d, 48h, or an ISO timestamp."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Compare two adapters on the traffic each actually served.
+
+    Paired within clusters, because live traffic is not a randomized trial: if the canary happened to draw more
+    of an easy cluster, an unpaired comparison would credit it for the mix rather than the model.
+    """
+    from agentdistill.registry.lifecycle import adapter as get_adapter
+    from agentdistill.router.compare_live import compare_live, live_rows
+
+    cfg = _load(config)
+    reg = _registry(cfg)
+    try:
+        prod_row, canary_row = get_adapter(reg, prod), get_adapter(reg, canary)
+    except LookupError as e:
+        err.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+
+    rows = live_rows(reg, since=_since(since))
+    result = compare_live(rows, prod_row["id"], canary_row["id"])
+    if result is None:
+        err.print(
+            f"[yellow]Not enough live traffic to compare.[/yellow] Found {len(rows)} graded requests since "
+            f"{since}, but a paired comparison needs at least three clusters with five observations on each "
+            f"adapter. Leave the canary running, or raise serve.canary_share."
+        )
+        raise typer.Exit(code=1)
+
+    delta = result["success"]["delta"] * 100
+    lo, hi = (v * 100 for v in result["success"]["ci95"])
+    verdict = "better" if lo > 0 else ("worse" if hi < 0 else "no difference detected")
+    colour = "green" if lo > 0 else ("red" if hi < 0 else "yellow")
+
+    console.print(f"[bold]{canary_row['name']}[/bold] vs [bold]{prod_row['name']}[/bold]  (since {since})")
+    console.print(f"  success   [{colour}]{delta:+.1f} pp[/{colour}]   95% CI [{lo:+.1f}, {hi:+.1f}]   {verdict}")
+    console.print(
+        f"  based on  {result['n_canary']} canary and {result['n_prod']} prod requests "
+        f"over {result['n_clusters']} clusters"
+    )
+    for cluster, entry in sorted(result["per_cluster"].items(), key=lambda kv: int(kv[0])):
+        console.print(
+            f"    cluster {cluster:>3}  {entry['delta'] * 100:+6.1f} pp   "
+            f"n={entry['n_canary']}/{entry['n_prod']}"
+        )
+
+
+def _since(spec: str) -> str:
+    """Parse `7d`, `48h`, or an ISO timestamp into an ISO timestamp."""
+    from datetime import UTC, datetime, timedelta
+
+    spec = spec.strip()
+    if spec.endswith(("d", "h")):
+        try:
+            n = int(spec[:-1])
+        except ValueError:
+            pass
+        else:
+            delta = timedelta(days=n) if spec.endswith("d") else timedelta(hours=n)
+            return (datetime.now(UTC) - delta).isoformat()
+    return spec
+
+
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(app())
