@@ -148,3 +148,27 @@ def test_every_doc_the_plan_asked_for_exists():
     expected = {"cascade", "curation", "canonical-json", "evaluation", "quickstart",
                 "results", "retrain", "router", "serving", "tos"}
     assert expected <= {p.stem for p in DOCS}
+
+
+def test_nothing_reads_the_raw_base_model_path():
+    """`train.base_model` may be a path relative to the config, so every consumer must resolve it.
+
+    This has bitten three times in one rehearsal -- `base-check`, the rollout tokenizer, and loading an adapter's
+    stored base model -- because each site read `cfg.train.base_model` directly. `cfg.base_model` resolves it;
+    `cfg.resolve_model(...)` resolves a value read from a registry row. Recording the configured spelling is
+    fine, so the check is narrow: no *unresolved read* outside config.py itself.
+    """
+    offenders = []
+    for path in sorted((ROOT / "agentdistill").rglob("*.py")):
+        if path.name == "config.py":
+            continue
+        for i, line in enumerate(path.read_text().splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if ".train.base_model" in line and "resolve_model" not in line and "getattr(cfg" not in line:
+                offenders.append(f"{path.relative_to(ROOT)}:{i}: {line.strip()}")
+
+    assert not offenders, (
+        "these read train.base_model without resolving it, so they work from beside the config and fail from "
+        "anywhere else:\n  " + "\n  ".join(offenders)
+    )

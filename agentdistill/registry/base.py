@@ -17,7 +17,7 @@ from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.exc import OperationalError
 
 MIGRATIONS = Path(__file__).resolve().parent / "migrations"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 #: Migrations are applied in order; each is idempotent.
 MIGRATION_FILES = (
@@ -26,6 +26,7 @@ MIGRATION_FILES = (
     "003_phase3.sql",
     "004_phase3c.sql",
     "005_prompt_tokens.sql",
+    "006_rft_kind.sql",
 )
 
 
@@ -154,9 +155,21 @@ class Registry:
     # ----------------------------------------------------------------------------------------------------------
 
     def migrate(self) -> None:
-        """Apply migrations that have not been applied. Idempotent: every statement is IF NOT EXISTS."""
+        """Apply migrations that have not been applied yet, once each.
+
+        Every file is recorded in `schema_migrations` after it runs, and a recorded file is skipped. The earlier
+        version re-ran every file on every open and relied on each one being idempotent, which held while
+        migrations only added columns and indexes. It stops holding the moment a migration has to rebuild a
+        table -- SQLite cannot alter a CHECK constraint in place -- and rebuilding a table on every process
+        start is both wasteful and a window in which an interrupted run loses rows.
+        """
         with self.engine.begin() as conn:
+            self._ensure_migration_ledger(conn)
+            applied = self._applied_migrations(conn)
+
             for filename in MIGRATION_FILES:
+                if filename in applied:
+                    continue
                 sql_path = MIGRATIONS / self.dialect / filename
                 for stmt in split_statements(sql_path.read_text()):
                     if stmt.upper().startswith("PRAGMA") and self.dialect != "sqlite":
@@ -164,15 +177,35 @@ class Registry:
                     try:
                         conn.execute(text(stmt))
                     except OperationalError as e:
-                        # SQLite has no `ADD COLUMN IF NOT EXISTS`, so re-running a migration that adds a column
-                        # raises rather than being a no-op. Every other statement is already idempotent.
+                        # A database created before the ledger existed has already had these applied. SQLite has
+                        # no `ADD COLUMN IF NOT EXISTS`, so replaying one raises rather than being a no-op.
                         if "duplicate column name" not in str(e).lower():
                             raise
+                conn.execute(
+                    text("INSERT INTO schema_migrations (filename, applied_at) VALUES (:f, :t)"),
+                    {"f": filename, "t": utcnow()},
+                )
+
             if not self._has_version(conn):
                 conn.execute(
                     text("INSERT INTO schema_version (version, applied_at) VALUES (:v, :t)"),
                     {"v": SCHEMA_VERSION, "t": utcnow()},
                 )
+
+    @staticmethod
+    def _ensure_migration_ledger(conn: Any) -> None:
+        conn.execute(
+            text(
+                """CREATE TABLE IF NOT EXISTS schema_migrations (
+                       filename   TEXT PRIMARY KEY,
+                       applied_at TEXT NOT NULL
+                   )"""
+            )
+        )
+
+    @staticmethod
+    def _applied_migrations(conn: Any) -> set[str]:
+        return {r[0] for r in conn.execute(text("SELECT filename FROM schema_migrations")).fetchall()}
 
     def _has_version(self, conn: Any) -> bool:
         row = conn.execute(text("SELECT version FROM schema_version WHERE version = :v"), {"v": SCHEMA_VERSION}).first()

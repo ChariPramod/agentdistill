@@ -66,7 +66,9 @@ def build_dataset(
     Raises TemplateError before doing any work if the base model's chat template cannot render tools or cannot be
     masked from offsets.
     """
-    model = base_model or (cfg.train.base_model if cfg.train else None)
+    # `cfg.base_model`, not `cfg.train.base_model`: the configured value may be a path relative to the config,
+    # and a tokenizer cannot be loaded from a path relative to wherever the command was typed.
+    model = base_model or getattr(cfg, "base_model", None) or (cfg.train.base_model if cfg.train else None)
     if tokenizer is None:
         if not model:
             raise ValueError("no base model: set train.base_model in project.yaml or pass base_model")
