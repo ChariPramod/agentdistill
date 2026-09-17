@@ -29,7 +29,7 @@ from agentdistill.gateway.dialect import (
     to_openai_response,
 )
 from agentdistill.gateway.resolve import UnknownModel, resolve
-from agentdistill.gateway.state import GatewayState
+from agentdistill.gateway.state import GatewayState, NoTeacher
 from agentdistill.router.canary import use_canary
 
 logger = logging.getLogger(__name__)
@@ -94,6 +94,9 @@ async def handle(req: dict) -> tuple[dict, dict, dict]:
             await _check_fallback_rate()
         else:
             raise HTTPException(status_code=502, detail=str(e)) from e
+    except NoTeacher as e:
+        # 503, not 500: this is a configuration the operator can fix, and the message says how.
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
     meta.update(arm_meta)
     meta["latency_ms"] = int((time.time() - started) * 1000)

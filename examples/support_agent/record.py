@@ -127,6 +127,11 @@ def summarize(traces: list[dict]) -> dict:
 
 
 def print_summary(summary: dict) -> None:
+    if not summary.get("n"):
+        # Every episode failed. Saying so plainly matters: this used to raise KeyError on the missing
+        # `success_rate`, which buried the real errors under a traceback from the summary printer.
+        print("\nrecorded 0 traces — every episode failed. The errors above are the reason.")
+        return
     print(f"\nrecorded {summary['n']} traces, teacher success {summary['success_rate']:.1%}")
     print(f"tokens: {summary['prompt_tokens']:,} prompt, {summary['completion_tokens']:,} completion")
     print("\nby scenario:")

@@ -17,6 +17,10 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+class NoTeacher(RuntimeError):
+    """A request needs the teacher and none is configured."""
+
+
 @dataclass
 class GatewayState:
     student: Any = None
@@ -77,6 +81,14 @@ class GatewayState:
 
         threshold = threshold if threshold is not None else self.prod_threshold
         if not self.cascade_available or threshold is None:
+            if self.teacher is None:
+                # No gate and nothing to escalate to. Serving the student ungated would quietly change what the
+                # agent gets; a clear failure is the honest option, and `load_state` already warned at boot.
+                raise NoTeacher(
+                    "this request needs the teacher -- there is no usable calibration, so every turn "
+                    "escalates -- but no teacher is configured. Add a `teacher` section to project.yaml, or "
+                    "call `student:<adapter>` to get the student alone."
+                )
             data = await self.teacher.chat(messages, tools, temperature=temperature)
             choice = data["choices"][0]
             return choice, data.get("usage", {}), {
@@ -135,6 +147,12 @@ def load_state(cfg: Any, registry: Any, student: Any = None, teacher: Any = None
         k_samples=cfg.cascade.k_samples,
         teacher_names={cfg.teacher.model} if cfg.teacher else set(),
     )
+
+    if state.teacher is None:
+        notes.append(
+            "no `teacher` section in project.yaml, so nothing can be escalated to. Requests that need the "
+            "teacher will fail rather than silently serving an ungated student."
+        )
 
     prod = prod_adapter(registry)
     if prod is None:

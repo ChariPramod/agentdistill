@@ -18,8 +18,15 @@ cleanup() {
   local status=$?
   [[ -n "${GW_PID:-}"   ]] && kill "$GW_PID"   2>/dev/null || true
   [[ -n "${VLLM_PID:-}" ]] && kill "$VLLM_PID" 2>/dev/null || true
-  # On failure the logs are the only evidence of what went wrong, so say where they are.
-  [[ $status -ne 0 ]] && echo "failed; see logs/vllm.log and logs/gateway.log" >&2
+  if [[ $status -ne 0 ]]; then
+    # Print the gateway's last error rather than only naming the file. A smoke test that fails and makes you
+    # go reading is a smoke test you stop running.
+    echo "failed; see logs/vllm.log and logs/gateway.log" >&2
+    if [[ -s logs/gateway.log ]]; then
+      echo "--- last gateway error ---" >&2
+      grep -E "Error|Exception|Traceback|detail" logs/gateway.log 2>/dev/null | tail -5 >&2 || true
+    fi
+  fi
   return $status
 }
 trap cleanup EXIT

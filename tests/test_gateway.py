@@ -454,3 +454,53 @@ def test_the_outcome_is_still_recorded_on_a_fallback(registry):
         request_id = ask(c, model="student").json()["agentdistill"]["request_id"]
         c.post("/v1/feedback", json={"request_id": request_id, "success": True})
     assert state.log.recent()[0]["outcome"]
+
+
+# --------------------------------------------------------------------------------------------------------------
+# no teacher configured
+#
+# The cascade escalates when the gate is unusable, and with no teacher there is nothing to escalate to. This
+# used to raise AttributeError on None and surface as a 500.
+# --------------------------------------------------------------------------------------------------------------
+
+
+def test_a_request_needing_the_teacher_fails_clearly_when_there_is_none(registry):
+    """503 with an actionable message, not a 500. Serving the student ungated instead would quietly change
+    what the agent gets, which is worse than an error the operator can fix."""
+    state = build_state(registry, threshold=None, prod="prod-v1")
+    state.teacher = None
+    app_module.set_state(state)
+
+    with TestClient(app_module.app) as c:
+        r = c.post("/v1/chat/completions", json={
+            "model": "cascade:prod-v1:auto",
+            "messages": [{"role": "user", "content": "hello"}],
+        })
+
+    assert r.status_code == 503
+    detail = r.json()["detail"]
+    assert "no teacher is configured" in detail
+    assert "student:" in detail, "the message should say what to call instead"
+
+
+def test_the_student_route_still_works_without_a_teacher(registry):
+    """Only the paths that actually need the teacher may fail. The student alone is still serveable."""
+    state = build_state(registry, prod="prod-v1")
+    state.teacher = None
+    app_module.set_state(state)
+
+    with TestClient(app_module.app) as c:
+        r = c.post("/v1/chat/completions", json={
+            "model": "student", "messages": [{"role": "user", "content": "hello"}],
+        })
+
+    assert r.status_code == 200
+    assert r.json()["agentdistill"]["arm"] == "student"
+
+
+def test_boot_warns_when_no_teacher_is_configured(registry, project_config):
+    from agentdistill.gateway.state import load_state
+
+    project_config.teacher = None
+    state = load_state(project_config, registry, student=object(), teacher=None)
+    assert any("no `teacher` section" in n for n in state.notes)
