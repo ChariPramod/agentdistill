@@ -174,3 +174,20 @@ def test_record_accepts_the_flags_the_smoke_script_passes():
     # The dialect prefix is required with --base-url, because it is what picks which translation is exercised.
     with pytest.raises(SystemExit):
         main(["--model", "gpt-4.1", "--base-url", "http://127.0.0.1:8710/v1", "--n", "1"])
+
+
+def test_the_fallback_check_reads_the_fallback_count_not_the_request_count():
+    """The health block reports both `requests` and `fallbacks`. Reading the wrong one makes the check fire on
+    every healthy run, which is how a guard becomes noise and then gets deleted."""
+    text = SMOKE.read_text()
+    assert '.get("fallback",{}).get("fallbacks",0)' in text
+    assert '.get("fallback",{}).get("requests",0)' not in text
+
+
+def test_the_health_block_actually_reports_a_fallbacks_key(registry):
+    """Pins the contract the script depends on, so renaming the key breaks a test rather than the GPU day."""
+    from agentdistill.gateway.log import RequestLog
+
+    stats = RequestLog(registry).fallback_rate()
+    assert "fallbacks" in stats and "requests" in stats
+    assert stats["fallbacks"] == 0 and stats["requests"] == 0

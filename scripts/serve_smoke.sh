@@ -90,9 +90,13 @@ if [[ $LOGGED -lt 10 ]]; then
   exit 1
 fi
 
-# A run where every request fell back is a run where vLLM never served anything, and it would otherwise pass.
+# A run where every request fell back is a run where vLLM never served anything, and it would otherwise pass:
+# the gateway answers, the agent gets replies, and the request log fills up.
+#
+# `fallbacks`, not `requests` -- the health block reports both, and reading the wrong one makes this fire on
+# every healthy run.
 FALLBACKS="$(curl -s "http://127.0.0.1:${GW_PORT}/healthz" | python -c \
-  'import json,sys; print(json.load(sys.stdin).get("fallback",{}).get("requests",0))')"
+  'import json,sys; print(json.load(sys.stdin).get("fallback",{}).get("fallbacks",0))')"
 if [[ "$FALLBACKS" -ge $LOGGED ]]; then
   echo "every one of the $LOGGED requests fell back to the teacher; the student never served" >&2
   exit 1
