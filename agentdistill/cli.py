@@ -872,14 +872,32 @@ def _onpolicy_stages(cfg, reg, tag, round_cfg, backend: str = "hf"):
                 "eval_run_id": None}
 
     def _build_rft(rollouts, cap):
+        """Successful rollouts, written as a real dataset.
+
+        An earlier version returned a fabricated `ds_rft_<hex>` that was never inserted. Two things went wrong
+        with that: recording the round violated the foreign key on `rounds.rft_dataset_id`, so a round could
+        not even be written down; and the training stage looked the id up, found nothing, and fell back to
+        treating it as a path -- so the round trained on nothing it had just built.
+        """
+        from agentdistill.data.dataset import build_dataset
         from agentdistill.eval.rollouts import RolloutSet
 
         rs = state.get("rollouts") or RolloutSet(rollouts=rollouts)
         picked = build_rft_fn(rs, cap_per_task=cap)
         state["rft"] = picked
-        return f"ds_rft_{uuid.uuid4().hex[:8]}", len(picked)
+        if not picked:
+            return None, 0
+
+        name = f"{cfg.name}-rft"
+        result = build_dataset(
+            picked, cfg, name=name, version=reg.next_dataset_version(name), registry=reg, kind="rft",
+            filter_config={"source": "on-policy rollouts", "cap_per_task": cap, "tag": tag},
+        )
+        return result.dataset_id, len(picked)
 
     def _build_pairs(rollouts, teacher_by_task):
+        """Preference pairs, written as a real dataset, for the same reasons as `_build_rft`."""
+        from agentdistill.data.pairs import write_pairs_dataset
         from agentdistill.eval.rollouts import RolloutSet
         from agentdistill.train.dpo_data import balance_kinds, filter_pairs
 
@@ -888,7 +906,14 @@ def _onpolicy_stages(cfg, reg, tag, round_cfg, backend: str = "hf"):
         usable, _ = filter_pairs(pairs)
         balanced, kinds = balance_kinds(usable, max_teacher_ratio=round_cfg.max_teacher_ratio)
         state["pairs"] = balanced
-        return f"ds_pairs_{uuid.uuid4().hex[:8]}", len(balanced), kinds
+        if not balanced:
+            return None, 0, kinds
+
+        name = f"{cfg.name}-pairs"
+        dataset_id = write_pairs_dataset(
+            balanced, cfg, reg, name=name, version=reg.next_dataset_version(name), tag=tag
+        )
+        return dataset_id, len(balanced), kinds
 
     def _train_sft_continue(adapter, dataset_id):
         """One RFT epoch continuing from the round's starting adapter.
@@ -897,7 +922,6 @@ def _onpolicy_stages(cfg, reg, tag, round_cfg, backend: str = "hf"):
         correction on top of what the adapter already does, and a fresh-run learning rate would walk out of the
         solution it starts in.
         """
-        import uuid
 
         from agentdistill.registry import utcnow
         from agentdistill.train.sft import train_sft
@@ -947,7 +971,7 @@ def _onpolicy_stages(cfg, reg, tag, round_cfg, backend: str = "hf"):
             raise typer.Exit(code=1)
         out_dir = cfg.artifacts_dir / "merged" / f"{row['name']}-v{row['version']}"
         info = merge_and_verify(
-            row["base_model"], row["path"], str(out_dir),
+            cfg.resolve_model(row["base_model"]), row["path"], str(out_dir),
             _verification_traces(reg, cfg, 200), _turn_client_factory(cfg, backend),
         )
         return info["out_dir"]
@@ -1068,7 +1092,10 @@ def _resolve_client(
             err.print(f"[red]no adapter named {subject!r}[/red]; try `agentdistill adapter list`, "
                       f"or use `base`, `recorded`, or `http:<model>@<url>`.")
             raise typer.Exit(code=1)
-        adapter_path, base_model = match["path"], match["base_model"]
+        # The row's base_model is stored as it was configured, which may be a config-relative path. Resolve it
+        # the same way `cfg.base_model` does, or loading an adapter works from beside the config and fails from
+        # anywhere else.
+        adapter_path, base_model = match["path"], cfg.resolve_model(match["base_model"])
 
     if backend == "vllm":
         from agentdistill.eval.clients import VllmOfflineTurnClient
@@ -1585,7 +1612,8 @@ def adapter_merge(
     console.print(f"Merging {row['name']} v{row['version']} into {row['base_model']} → {out_dir}")
     try:
         info = merge_and_verify(
-            row["base_model"], row["path"], str(out_dir), traces, _turn_client_factory(cfg, backend)
+            cfg.resolve_model(row["base_model"]), row["path"], str(out_dir), traces,
+            _turn_client_factory(cfg, backend)
         )
     except MergeVerificationFailed as e:
         err.print(f"[red]merge verification failed[/red]: {e}")

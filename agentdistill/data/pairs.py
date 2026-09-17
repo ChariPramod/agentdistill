@@ -142,3 +142,55 @@ def write_pairs_jsonl(pairs: list[dict], path: Any) -> Any:
         for pair in pairs:
             fh.write(json.dumps(pair, ensure_ascii=False) + "\n")
     return p
+
+
+def write_pairs_dataset(
+    pairs: list[dict], cfg: Any, registry: Any, name: str, version: int, tag: str | None = None
+) -> str:
+    """Write a DPO pair set as a registered, content-hashed dataset.
+
+    Registered rather than left on disk, because an on-policy round records the dataset it trained on and the
+    `rounds` table has a foreign key to it. A fabricated id means a round that cannot be written down at all,
+    which is the worst possible outcome for a stage whose whole job is to be auditable.
+
+    Content-hashed for the same reason SFT datasets are: two rounds that produced identical pairs should be
+    recognisably the same input, and a report that cites a pair set should cite something immutable.
+    """
+    from pathlib import Path
+
+    from agentdistill.registry.base import utcnow
+
+    payload = "\n".join(json.dumps(p, ensure_ascii=False, sort_keys=True) for p in pairs)
+    content_hash = hashlib.sha256(payload.encode()).hexdigest()
+    dataset_id = f"ds_{content_hash[:16]}"
+
+    existing = registry.get_dataset(dataset_id)
+    if existing is not None:
+        return str(existing["id"])
+
+    out_dir = Path(cfg.artifacts_dir) / "datasets" / f"{name}-v{version}"
+    path = write_pairs_jsonl(pairs, out_dir / "pairs.jsonl")
+    (out_dir / "manifest.json").write_text(
+        json.dumps(
+            {"kind": "dpo", "name": name, "version": version, "n_pairs": len(pairs),
+             "content_hash": content_hash, "tag": tag},
+            indent=2, sort_keys=True,
+        )
+        + "\n"
+    )
+
+    registry.insert_dataset({
+        "id": dataset_id,
+        "name": name,
+        "version": version,
+        "kind": "dpo",
+        "filter_config": {"source": "on-policy rollouts", "tag": tag},
+        "n_samples": len(pairs),
+        # Pairs are not tokenized here, so there is no honest token count to report.
+        "n_tokens": 0,
+        "content_hash": content_hash,
+        "path": str(path.parent),
+        "report_path": None,
+        "created_at": utcnow(),
+    })
+    return dataset_id

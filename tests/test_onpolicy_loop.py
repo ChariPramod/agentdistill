@@ -7,6 +7,8 @@ exercised without a GPU.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from agentdistill.train.onpolicy import RoundCfg, Stages, decide, plan, run_round, run_rounds
@@ -288,3 +290,93 @@ def test_plan_reports_sizes_and_gates():
     assert "50 x 8 = 400" in lines
     assert "fuzzy" in lines
     assert "promote if" in lines and "schema validity" in lines
+
+
+# --------------------------------------------------------------------------------------------------------------
+# the datasets a round builds must be real
+#
+# They were fabricated ids: `ds_rft_<hex>` that nothing ever inserted. Recording the round then violated the
+# foreign key on `rounds.rft_dataset_id`, so a round could not be written down at all -- and the training stage
+# looked the id up, found nothing, and silently fell back to treating it as a path. A round that cannot be
+# audited is worse than a round that did not run.
+# --------------------------------------------------------------------------------------------------------------
+
+
+def test_a_pair_set_is_written_as_a_registered_dataset(project_config, registry, tmp_path):
+    from agentdistill.data.pairs import write_pairs_dataset
+
+    pairs = [
+        {"prompt": [{"role": "user", "content": f"task {i}"}],
+         "chosen": [{"role": "assistant", "content": "right"}],
+         "rejected": [{"role": "assistant", "content": "wrong"}]}
+        for i in range(6)
+    ]
+    dataset_id = write_pairs_dataset(pairs, project_config, registry, name="demo-pairs", version=1, tag="r1")
+
+    row = registry.get_dataset(dataset_id)
+    assert row is not None
+    assert row["kind"] == "dpo"
+    assert row["n_samples"] == 6
+    # Looked up by id, which is what the round records and the trainer reads back.
+    assert registry.get_dataset(row["id"])["id"] == dataset_id
+    assert (Path(row["path"]) / "pairs.jsonl").exists()
+
+
+def test_the_same_pairs_produce_the_same_dataset_id(project_config, registry):
+    """Content-hashed: two rounds that produced identical pairs are recognisably the same input."""
+    from agentdistill.data.pairs import write_pairs_dataset
+
+    pairs = [{"prompt": [{"role": "user", "content": "a"}],
+              "chosen": [{"role": "assistant", "content": "x"}],
+              "rejected": [{"role": "assistant", "content": "y"}]}]
+    first = write_pairs_dataset(pairs, project_config, registry, name="p", version=1)
+    second = write_pairs_dataset(pairs, project_config, registry, name="p", version=2)
+    assert first == second
+    assert len([d for d in registry.list_datasets() if d["id"] == first]) == 1
+
+
+def test_different_pairs_produce_different_ids(project_config, registry):
+    from agentdistill.data.pairs import write_pairs_dataset
+
+    def pairs(answer: str) -> list[dict]:
+        return [{"prompt": [{"role": "user", "content": "a"}],
+                 "chosen": [{"role": "assistant", "content": answer}],
+                 "rejected": [{"role": "assistant", "content": "y"}]}]
+
+    a = write_pairs_dataset(pairs("x"), project_config, registry, name="p", version=1)
+    b = write_pairs_dataset(pairs("z"), project_config, registry, name="p", version=2)
+    assert a != b
+
+
+def test_a_round_can_be_recorded_with_the_dataset_ids_it_built(project_config, registry):
+    """The foreign keys are the point: a fabricated id made `record_round` fail outright."""
+    from agentdistill.data.pairs import write_pairs_dataset
+    from agentdistill.registry.base import utcnow
+
+    registry.insert_dataset({"id": "ds_seed", "name": "seed", "version": 1, "kind": "sft", "filter_config": {},
+                             "n_samples": 1, "n_tokens": 1, "content_hash": "h", "path": "/tmp/seed"})
+    registry.insert_training_run({"id": "tr1", "dataset_id": "ds_seed", "base_model": "m", "method": "sft",
+                                  "config": {}, "status": "succeeded", "started_at": utcnow()})
+    registry.insert_adapter({"id": "ad1", "training_run_id": "tr1", "name": "a", "version": 1,
+                             "base_model": "m", "path": "/tmp/a"})
+
+    pairs_id = write_pairs_dataset(
+        [{"prompt": [{"role": "user", "content": "a"}],
+          "chosen": [{"role": "assistant", "content": "x"}],
+          "rejected": [{"role": "assistant", "content": "y"}]}],
+        project_config, registry, name="pp", version=1,
+    )
+
+    registry.record_round({
+        "round_idx": 1, "start_adapter": "ad1", "tag": "r1",
+        "ids": {"round_id": "rd1", "dpo_dataset": pairs_id},
+        "decision": "discard", "reason": "rehearsal",
+        "started_at": utcnow(),
+    })
+
+    from sqlalchemy import text
+
+    with registry.engine.connect() as conn:
+        row = conn.execute(text("SELECT * FROM onpolicy_rounds WHERE id = 'rd1'")).mappings().first()
+    assert row is not None
+    assert row["dpo_dataset_id"] == pairs_id
