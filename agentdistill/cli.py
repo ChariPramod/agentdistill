@@ -24,12 +24,14 @@ adapter_app = typer.Typer(no_args_is_help=True, help="Adapter lifecycle: merge, 
 eval_app = typer.Typer(no_args_is_help=True, help="Run and compare evaluations.")
 train_app = typer.Typer(no_args_is_help=True, help="Supervised and on-policy training.")
 evalset_app = typer.Typer(no_args_is_help=True, help="Register and freeze held-out eval sets.")
+requests_app = typer.Typer(no_args_is_help=True, help="Inspect the gateway's request log.")
 app.add_typer(ingest_app, name="ingest")
 app.add_typer(dataset_app, name="dataset")
 app.add_typer(adapter_app, name="adapter")
 app.add_typer(eval_app, name="eval")
 app.add_typer(train_app, name="train")
 app.add_typer(evalset_app, name="evalset")
+app.add_typer(requests_app, name="requests")
 
 console = Console()
 err = Console(stderr=True)
@@ -1351,15 +1353,197 @@ def calibrate(
 
 
 @adapter_app.command("merge")
-def adapter_merge(adapter: str) -> None:
-    """Merge LoRA into the base for serving."""
-    _not_built("adapter merge", "milestone 2")
+def adapter_merge(
+    adapter: str = typer.Argument(..., help="Adapter id or name."),
+    out: str = typer.Option("", help="Where to write the merged weights. Defaults to artifacts/merged/<name>."),
+    turns: int = typer.Option(200, help="Held-out turns to verify the merge against."),
+    force: bool = typer.Option(False, help="Register the merge even if verification fails."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Merge LoRA into the base weights, verify, and register the result.
+
+    Verification is teacher-forced next-action agreement against the unmerged adapter. It is the check that
+    catches a `target_modules` list that missed a projection or a base revision that moved -- failures that
+    produce a model which loads cleanly and is quietly worse.
+    """
+    import uuid
+
+    from agentdistill.registry.lifecycle import adapter as get_adapter
+    from agentdistill.train.merge import MergeVerificationFailed, merge_and_verify
+
+    cfg = _load(config)
+    reg = _registry(cfg)
+    try:
+        row = get_adapter(reg, adapter)
+    except LookupError as e:
+        err.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+
+    out_dir = Path(out) if out else Path(cfg.artifacts) / "merged" / f"{row['name']}-v{row['version']}"
+    traces = _verification_traces(reg, cfg, turns)
+    if not traces:
+        err.print("[red]no held-out traces to verify the merge against[/red] — define an eval set first.")
+        raise typer.Exit(code=1)
+
+    console.print(f"Merging {row['name']} v{row['version']} into {row['base_model']} → {out_dir}")
+    try:
+        info = merge_and_verify(
+            row["base_model"], row["path"], str(out_dir), traces, _turn_client_factory(cfg)
+        )
+    except MergeVerificationFailed as e:
+        err.print(f"[red]merge verification failed[/red]: {e}")
+        if not force:
+            err.print("The merged weights are on disk and marked as unverified. Nothing was registered.")
+            raise typer.Exit(code=1) from e
+        info = {"out_dir": str(out_dir), "verification": {"ok": False, "reason": str(e)}}
+        console.print("[yellow]--force: registering an unverified merge.[/yellow]")
+
+    v = info["verification"]
+    console.print(
+        f"  next-action agreement: merged {v.get('merged_full_match', float('nan')):.3f} vs adapter "
+        f"{v.get('unmerged_full_match', float('nan')):.3f}   drift {v.get('drift_pp', float('nan')):+.1f} pp"
+    )
+    if v.get("note"):
+        console.print(f"  [yellow]{v['note']}[/yellow]")
+
+    merged_id = f"ad_{uuid.uuid4().hex[:16]}"
+    reg.insert_adapter({
+        "id": merged_id, "training_run_id": row["training_run_id"], "name": f"{row['name']}-merged",
+        "version": row["version"], "base_model": row["base_model"], "path": str(out_dir),
+        "merged": True, "parent_adapter_id": row["id"],
+    })
+    console.print(f"[green]registered[/green] {merged_id} (merged, parent {row['id']}), status candidate")
 
 
 @adapter_app.command("quantize")
-def adapter_quantize(adapter: str, method: str = "fp8") -> None:
-    """Produce a quantized serving artifact and evaluate it."""
-    _not_built("adapter quantize", "milestone 6")
+def adapter_quantize(
+    adapter: str = typer.Argument(..., help="Adapter id or name. Usually a merged one."),
+    method: str = typer.Option("", help="fp8 or awq. Defaults to serve.quantization."),
+    out: str = typer.Option("", help="Where to write. Defaults to artifacts/quantized/<name>."),
+    n_calib: int = typer.Option(128, help="Calibration prompts for AWQ, drawn from the training set."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Produce a quantized serving artifact.
+
+    AWQ calibrates on real task prompts rather than generic text. An agent's prompts are dominated by tool
+    schemas, and a quantizer that never saw one will sacrifice the channels that emit them -- giving a model
+    that chats fine and produces malformed tool calls.
+    """
+    import uuid
+
+    from agentdistill.registry.lifecycle import adapter as get_adapter
+    from agentdistill.train.quantize import CalibrationTooSmall, calibration_prompts, quantize
+
+    cfg = _load(config)
+    reg = _registry(cfg)
+    method = method or (cfg.serve.quantization or "fp8")
+    try:
+        row = get_adapter(reg, adapter)
+    except LookupError as e:
+        err.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+
+    if not row.get("merged") and method != "fp8":
+        err.print(
+            f"[yellow]{row['name']} is a LoRA adapter, not merged weights.[/yellow] "
+            f"{method} rewrites a single set of weights; run `adapter merge` first."
+        )
+        raise typer.Exit(code=1)
+
+    out_dir = Path(out) if out else Path(cfg.artifacts) / "quantized" / f"{row['name']}-{method}"
+    prompts: list[str] = []
+    if method == "awq":
+        try:
+            prompts = calibration_prompts(_training_samples(reg, cfg), n=n_calib)
+        except CalibrationTooSmall as e:
+            err.print(f"[red]{e}[/red]")
+            raise typer.Exit(code=1) from e
+        console.print(f"Calibrating on {len(prompts)} task prompts from the training set.")
+
+    info = quantize(method, row["path"], str(out_dir), prompts)
+    console.print(f"[green]{method}[/green] → {info['out_dir']}"
+                  + ("  (applied online by vLLM)" if info.get("online") else ""))
+
+    quantized_id = f"ad_{uuid.uuid4().hex[:16]}"
+    reg.insert_adapter({
+        "id": quantized_id, "training_run_id": row["training_run_id"],
+        "name": f"{row['name']}-{method}", "version": row["version"], "base_model": row["base_model"],
+        "path": info["out_dir"], "merged": bool(row.get("merged")), "quantization": method,
+        "parent_adapter_id": row["id"],
+    })
+    console.print(f"[green]registered[/green] {quantized_id}, status candidate")
+    console.print(
+        f"  [dim]Next: `agentdistill eval run student:{row['name']}-{method}` and compare against the "
+        f"unquantized adapter. Quantization may cost at most 2 pp of success.[/dim]"
+    )
+
+
+def _verification_traces(registry: Any, cfg: Any, max_turns: int) -> list[dict]:
+    """Held-out traces for merge verification: the eval set, which never trained anything."""
+    trace_ids = registry.eval_set_trace_ids([cfg.eval.eval_set]) or registry.eval_set_trace_ids()
+    traces = [registry.get_trace(t) for t in sorted(trace_ids)]
+    out, turns = [], 0
+    for trace in traces:
+        if trace is None:
+            continue
+        out.append(trace)
+        turns += sum(1 for m in trace["messages"] if m["role"] == "assistant")
+        if turns >= max_turns:
+            break
+    return out
+
+
+def _training_samples(registry: Any, cfg: Any) -> list[dict]:
+    """Samples from the most recent SFT dataset, for quantizer calibration."""
+    import json
+
+    from agentdistill.registry.select import NoMatch, latest_dataset
+
+    try:
+        dataset = latest_dataset(registry, kind="sft")
+    except NoMatch:
+        return []
+    path = Path(dataset["path"])
+    if not path.exists():
+        return []
+    with path.open() as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def _turn_client_factory(cfg: Any, backend: str = "vllm") -> Any:
+    """Build a `TurnClient` for a merged directory or a base-plus-adapter pair.
+
+    Both sides go through the same client the eval harness uses, so a merge is verified on the inference path
+    that will actually serve it. A verification run through a different stack would be testing the stack.
+    """
+    def make(spec: dict) -> Any:
+        from agentdistill.eval.clients import HfTurnClient, VllmOfflineTurnClient
+
+        parser = cfg.train.tool_parser if cfg.train else None
+        parser_name = parser.name if parser else None
+        family = parser.family if parser else None
+
+        if spec["kind"] == "merged":
+            base_model, lora_path = spec["path"], None
+        else:
+            base_model, lora_path = spec["base"], spec["adapter"]
+
+        if backend == "vllm":
+            return VllmOfflineTurnClient(base_model, None, parser_name, family, lora_path=lora_path)
+
+        from agentdistill.data.dataset import load_tokenizer
+
+        tok = load_tokenizer(base_model)
+        from transformers import AutoModelForCausalLM
+
+        loaded: Any = AutoModelForCausalLM.from_pretrained(base_model)
+        if lora_path:
+            from peft import PeftModel
+
+            loaded = PeftModel.from_pretrained(loaded, lora_path)
+        return HfTurnClient(loaded, tok, parser_name, family)
+
+    return make
 
 
 @adapter_app.command("promote")
@@ -1632,6 +1816,101 @@ def _since(spec: str) -> str:
             delta = timedelta(days=n) if spec.endswith("d") else timedelta(hours=n)
             return (datetime.now(UTC) - delta).isoformat()
     return spec
+
+
+@adapter_app.command("path")
+def adapter_path(
+    adapter: str = typer.Argument("", help="Adapter id or name. Omit and use --status instead."),
+    status: str = typer.Option("", help="Select by lifecycle status: prod, canary, candidate."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Print one adapter's path, and nothing else.
+
+    Exists for the shell scripts: `serve_vllm.sh` builds its `--lora-modules` arguments from this, so the
+    serving command and the registry cannot disagree about which weights are in production.
+    """
+    cfg = _load(config)
+    reg = _registry(cfg)
+    if status:
+        rows = [a for a in reg.list_adapters() if a["status"] == status]
+        if not rows:
+            raise typer.Exit(code=1)
+        if len(rows) > 1 and status == "prod":
+            err.print(f"[red]{len(rows)} adapters are marked prod; exactly one may be[/red]")
+            raise typer.Exit(code=1)
+        print(sorted(rows, key=lambda a: a["created_at"])[-1]["path"])
+        return
+
+    if not adapter:
+        err.print("[red]give an adapter, or --status prod|canary[/red]")
+        raise typer.Exit(code=1)
+    from agentdistill.registry.lifecycle import adapter as get_adapter
+
+    try:
+        print(get_adapter(reg, adapter)["path"])
+    except LookupError:
+        raise typer.Exit(code=1) from None
+
+
+@requests_app.command("count")
+def requests_count(
+    since: str = typer.Option("", help="Only count rows after this: 7d, 48h, or an ISO timestamp."),
+    graded: bool = typer.Option(False, help="Only count requests that have an outcome."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Print how many requests the gateway has logged, and nothing else."""
+    from sqlalchemy import text
+
+    reg = _registry(_load(config))
+    sql, params = "SELECT COUNT(*) FROM requests WHERE 1=1", {}
+    if graded:
+        sql += " AND outcome IS NOT NULL"
+    if since:
+        sql += " AND received_at >= :since"
+        params["since"] = _since(since)
+    with reg.engine.connect() as conn:
+        print(int(conn.execute(text(sql), params).scalar() or 0))
+
+
+@requests_app.command("tail")
+def requests_tail(
+    n: int = typer.Option(20, "--n", "-n", help="How many rows."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """The most recent requests, newest last."""
+    from sqlalchemy import text
+
+    reg = _registry(_load(config))
+    with reg.engine.connect() as conn:
+        rows = [dict(r) for r in conn.execute(
+            text("""SELECT received_at, arm, adapter_id, cluster_id, confidence, escalated, outcome,
+                           fallback, latency_ms, student_tokens, teacher_tokens
+                    FROM requests ORDER BY received_at DESC LIMIT :n"""),
+            {"n": n},
+        ).mappings()]
+
+    if not rows:
+        console.print("[dim]no requests logged yet[/dim]")
+        return
+
+    table = Table(box=None, pad_edge=False)
+    for column in ("time", "arm", "adapter", "cl", "conf", "esc", "outcome", "fb", "ms", "tok"):
+        table.add_column(column)
+    for r in reversed(rows):
+        outcome = "-" if r["outcome"] is None else ("[green]ok[/green]" if r["outcome"] else "[red]fail[/red]")
+        table.add_row(
+            str(r["received_at"])[11:19],
+            str(r["arm"]),
+            str(r["adapter_id"] or "-")[:18],
+            "-" if r["cluster_id"] is None else str(r["cluster_id"]),
+            "-" if r["confidence"] is None else f"{r['confidence']:.2f}",
+            "y" if r["escalated"] else "-",
+            outcome,
+            "[red]y[/red]" if r["fallback"] else "-",
+            "-" if r["latency_ms"] is None else str(r["latency_ms"]),
+            str((r["student_tokens"] or 0) + (r["teacher_tokens"] or 0)),
+        )
+    console.print(table)
 
 
 if __name__ == "__main__":  # pragma: no cover

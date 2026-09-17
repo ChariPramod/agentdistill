@@ -8,6 +8,10 @@ Output is JSONL that `agentdistill ingest jsonl` accepts directly.
     # A real corpus. Any LiteLLM-supported model. Read docs/tos.md first.
     python -m examples.support_agent.record --model openai/gpt-4.1 --n 400 --out traces.jsonl
 
+    # Against a running agentdistill gateway, in either dialect. Used by scripts/serve_smoke.sh.
+    python -m examples.support_agent.record --model openai/cascade::auto \
+        --base-url http://127.0.0.1:8710/v1 --n 5 --out smoke.jsonl
+
 Labels come from predicates over the final database state plus the final message -- no judge, no rubric, no model
 grading a model. That is what makes the success rate here worth comparing against.
 """
@@ -26,6 +30,25 @@ from examples.support_agent.agent import final_assistant_text, run_agent
 from examples.support_agent.crm import TOOLS
 
 HERE = Path(__file__).resolve().parent
+
+
+def gateway_completion(base_url: str) -> Any:
+    """A `completion` callable that talks to a gateway instead of a provider.
+
+    The model prefix picks the dialect -- `openai/...` or `anthropic/...` -- because the gateway speaks both and
+    the point of driving it through the example agent is to exercise the dialect translation, not to bypass it.
+
+    An API key is required by the SDKs but not by the gateway, which authenticates nothing and must not be
+    exposed. A placeholder keeps the SDK happy without putting a real credential on a local connection.
+    """
+    import litellm
+
+    def completion(**kwargs: Any) -> Any:
+        kwargs.setdefault("api_base", base_url)
+        kwargs.setdefault("api_key", "agentdistill-gateway-local")
+        return litellm.completion(**kwargs)
+
+    return completion
 
 
 def record_one(task: Any, model: str, completion: Any = None, max_turns: int = 12,
@@ -141,10 +164,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--scenarios", nargs="*", default=None, help="Restrict to these scenario names.")
     ap.add_argument("--max-turns", type=int, default=12)
     ap.add_argument("--temperature", type=float, default=0.2)
+    ap.add_argument("--base-url", default=None,
+                    help="Send requests here instead of to the provider, e.g. a running agentdistill gateway. "
+                         "The model prefix (openai/ or anthropic/) picks the dialect.")
     args = ap.parse_args(argv)
 
     if not args.scripted and not args.model:
         ap.error("pass --model <litellm-model-id>, or --scripted to run without a teacher")
+    if args.base_url and args.scripted:
+        ap.error("--base-url and --scripted are mutually exclusive; the scripted teacher makes no requests")
+    if args.base_url and not (args.model or "").startswith(("openai/", "anthropic/")):
+        ap.error(
+            "--base-url needs a model prefixed with the dialect to speak, e.g. openai/cascade::auto or "
+            "anthropic/cascade::auto"
+        )
 
     completion = None
     model = args.model or "scripted/rule-based-teacher"
@@ -157,6 +190,9 @@ def main(argv: list[str] | None = None) -> int:
             "must not be used to train a student or to publish a number.",
             file=sys.stderr,
         )
+    elif args.base_url:
+        completion = gateway_completion(args.base_url)
+        print(f"sending requests to {args.base_url} as {model}", file=sys.stderr)
 
     tasks = scenarios.sample(args.n, seed=args.seed, scenarios=args.scenarios)
     print(f"recording {len(tasks)} tasks with {model}", file=sys.stderr)
