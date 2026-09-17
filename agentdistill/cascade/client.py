@@ -166,3 +166,33 @@ def from_calibration(
         cluster_prior=cluster_prior,
         escalate_everything=not usable,
     )
+
+
+@dataclass
+class TurnClientBackend:
+    """Adapts an eval `TurnClient` to the `SamplingBackend` the cascade expects.
+
+    The two protocols differ for a reason: an eval client returns one assistant message per call, while the
+    cascade needs `n` samples and per-token logprobs to score a turn. The eval clients can produce both, so
+    this reshapes what they return rather than introducing a second inference path -- the gate that gets
+    measured has to be the gate that serves, and that only holds if both sides see identically shaped input.
+    """
+
+    client: Any
+
+    def chat(self, messages: list[dict], tools: list[dict], n: int = 1, logprobs: bool = False) -> list[dict]:
+        turn = self.client.next_turn(messages, tools)
+        extras = {"logprobs", "samples", "text"}
+        core = {k: v for k, v in turn.items() if k not in extras}
+        tokens = [t["token"] for t in (turn.get("logprobs") or {}).get("content") or []]
+
+        primary = {
+            "message": core,
+            "logprobs": turn.get("logprobs"),
+            "text": turn.get("text") or "".join(tokens),
+        }
+        samples = [
+            {"message": {k: v for k, v in s.items() if k not in extras}, "logprobs": None, "text": ""}
+            for s in (turn.get("samples") or [])
+        ]
+        return [primary, *samples][: max(n, 1)] or [primary]

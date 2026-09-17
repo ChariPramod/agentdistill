@@ -67,6 +67,11 @@ What the rehearsal cannot cover: vLLM itself — no real tool parser, no LoRA lo
 anything CUDA. That is what `scripts/serve_smoke.sh` on the real box is for, and it is the first thing to run
 there.
 
+Expect one piece of noise that is not a defect. The tiny model has a 2048-token context, and agent trajectories
+run past it, so generation logs `exceeded the model's predefined maximum length`. On a real base model with a
+real context window it does not happen. If you want it quiet, raise `max_position_embeddings` in
+`scripts/make_tiny_model.py`, delete `artifacts/tiny/model`, and clear the `sft` and `merge` markers.
+
 Every rehearsal so far has found something, and each would otherwise have surfaced on rented hardware,
 mid-session, after the stages before it had already run:
 

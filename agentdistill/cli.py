@@ -1122,6 +1122,9 @@ def _resolve_client(
         # The control: replays the recorded turns. Used to prove the harness reproduces a trace.
         return "recorded"
 
+    if subject.startswith("cascade:"):
+        return _cascade_client(subject, cfg, backend)
+
     if subject == "teacher":
         # The teacher is an API, not a local checkpoint. This used to fall through to the local-model branch
         # and quietly evaluate `train.base_model` under the label "teacher", which makes the single most
@@ -1789,6 +1792,73 @@ def _training_samples(registry: Any, cfg: Any) -> list[dict]:
         return []
     with path.open() as f:
         return [json.loads(line) for line in f if line.strip()]
+
+
+def _cascade_client(subject: str, cfg: Any, backend: str) -> Any:
+    """Build a cascade for `cascade:<adapter>:<tau|auto>` as an eval subject.
+
+    This is what `--verify-threshold` measures against: the escalation rate the chosen threshold actually
+    produces when the teacher answers the low-confidence turns, rather than the rate predicted from turns the
+    student answered alone.
+
+    Both arms go through the eval clients the rest of the harness uses, reshaped by `TurnClientBackend`, so a
+    cascade measured here and a cascade served by the gateway score identically shaped input.
+    """
+    from agentdistill.cascade.client import TurnClientBackend, from_calibration
+    from agentdistill.registry.select import NoMatch, latest_calibration
+
+    parts = subject.split(":")
+    if len(parts) != 3:
+        err.print("[red]cascade subjects look like cascade:<adapter>:<tau|auto>[/red]")
+        raise typer.Exit(code=1)
+    _, adapter, tau = parts
+
+    if cfg.teacher is None:
+        err.print(
+            "[red]a cascade escalates to the teacher, and this project has no `teacher` section.[/red] "
+            "Evaluate `student:<adapter>` for the student alone, or configure a teacher."
+        )
+        raise typer.Exit(code=1)
+
+    reg = _registry(cfg)
+    row = next((a for a in reg.list_adapters() if a["id"] == adapter or a["name"] == adapter), None)
+    if row is None:
+        err.print(f"[red]no adapter {adapter!r} to build a cascade from[/red]")
+        raise typer.Exit(code=1)
+
+    try:
+        calibration = latest_calibration(reg, adapter_id=row["id"])
+    except NoMatch:
+        err.print(
+            f"[red]no calibration for {row['name']}[/red]; run `agentdistill calibrate {row['id']}` first. "
+            f"Without one the cascade escalates every turn and measures nothing."
+        )
+        raise typer.Exit(code=1) from None
+
+    threshold = float(calibration["threshold"]) if tau in ("", "auto") else _parse_cascade_tau(tau)
+    student = _resolve_client(
+        row["id"], cfg, backend, logprobs=True, samples=cfg.cascade.k_samples
+    )
+    return from_calibration(
+        student=TurnClientBackend(student),
+        teacher=TurnClientBackend(_teacher_client(cfg)),
+        calibration_dir=calibration["model_path"],
+        configured_features=list(cfg.cascade.features),
+        threshold=threshold,
+        k_samples=cfg.cascade.k_samples,
+    )
+
+
+def _parse_cascade_tau(tau: str) -> float:
+    try:
+        value = float(tau)
+    except ValueError:
+        err.print(f"[red]{tau!r} is not a threshold; use a number in [0, 1] or `auto`[/red]")
+        raise typer.Exit(code=1) from None
+    if not 0.0 <= value <= 1.0:
+        err.print(f"[red]threshold {value} is outside [0, 1][/red]")
+        raise typer.Exit(code=1)
+    return value
 
 
 def _teacher_client(cfg: Any, logprobs: bool = False) -> Any:

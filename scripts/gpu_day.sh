@@ -134,7 +134,18 @@ s_unseen()      { ad eval run "$(cap adapter adapter best --tag "$TAG*" "${CONFI
 
 s_logprobs()    { ad eval run "$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}")" --eval-set "$CALIB_SET" --n 3 --policy fuzzy --backend "$BACKEND" --logprobs --samples 3 --tag "$TAG-calib" "${CONFIG_ARG[@]}"; }
 s_calibrate()   { ad calibrate "$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}")" --from-eval "$(cap ev eval latest --eval-set "$CALIB_SET" "${CONFIG_ARG[@]}")" "${CONFIG_ARG[@]}"; }
-s_cascade_ver() { ad eval run "cascade:$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}"):auto" --eval-set "$EVAL_SET" --n 3 --policy fuzzy --backend "$BACKEND" --verify-threshold --tag "$TAG" "${CONFIG_ARG[@]}"; }
+s_cascade_ver() {
+  # A cascade escalates to the teacher, so this stage structurally needs one. Tiny mode has no teacher and must
+  # not invent a stand-in: substituting the base model here would measure the base model and call it a cascade,
+  # which is the same class of mistake that made `eval run teacher` wrong for months.
+  if [[ "$TINY" == "1" ]]; then
+    echo "skipped: a cascade needs a teacher to escalate to, and tiny mode has none."
+    echo "The cascade's own code paths are covered by tests/test_cascade_client.py; this stage measures the"
+    echo "escalation rate on real traffic, which only the GPU day can do."
+    return 0
+  fi
+  ad eval run "cascade:$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}"):auto" --eval-set "$EVAL_SET" --n 3 --policy fuzzy --backend "$BACKEND" --verify-threshold --tag "$TAG" "${CONFIG_ARG[@]}"
+}
 
 s_quantize()    { ad adapter quantize "$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}")" --method "$QUANT" "${CONFIG_ARG[@]}"; }
 s_eval_quant()  { ad eval run "$(cap adapter adapter latest --quantized "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" --n 3 --policy strict --backend "$BACKEND" --tag "$TAG" "${CONFIG_ARG[@]}"; }

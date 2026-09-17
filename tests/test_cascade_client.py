@@ -321,3 +321,118 @@ def test_a_mask_that_does_not_line_up_yields_no_argument_features():
     tool_choice = choice("x", tool="refund_order", n_tokens=4)
     features = turn_features(tool_choice, [True, True], [], 0.5, 0, 100)  # mask shorter than the tokens
     assert np.isnan(features.arg_mean_logprob)
+
+
+# --------------------------------------------------------------------------------------------------------------
+# `cascade:<adapter>:<tau>` as an eval subject
+#
+# The gateway understood this model name; the eval subject resolver did not, so the GPU day's cascade
+# verification stage could not run at all. It is what `--verify-threshold` measures against.
+# --------------------------------------------------------------------------------------------------------------
+
+
+class StubTurnClient:
+    """An eval client that reports logprobs and extra samples, the way the real ones now do."""
+
+    def __init__(self, content: str = "hi", samples: int = 2) -> None:
+        self.content, self.samples = content, samples
+
+    def next_turn(self, messages, tools):
+        return {
+            "role": "assistant",
+            "content": self.content,
+            "tool_calls": None,
+            "text": self.content,
+            "logprobs": {"content": [
+                {"token": c, "logprob": -0.1, "top_logprobs": [{"token": c, "logprob": -0.1}]}
+                for c in self.content
+            ]},
+            "samples": [{"role": "assistant", "content": self.content, "tool_calls": None}
+                        for _ in range(self.samples)],
+        }
+
+
+def test_a_turn_client_reshapes_into_the_backend_the_cascade_expects():
+    from agentdistill.cascade.client import TurnClientBackend
+
+    backend = TurnClientBackend(StubTurnClient())
+    choices = backend.chat([{"role": "user", "content": "x"}], [], n=3, logprobs=True)
+
+    assert len(choices) == 3
+    # The transport keys must not leak into the message, or the call signature differs from what serving sees.
+    assert set(choices[0]) == {"message", "logprobs", "text"}
+    assert "samples" not in choices[0]["message"]
+    assert "logprobs" not in choices[0]["message"]
+    assert choices[0]["logprobs"]["content"], "the primary choice must carry logprobs"
+
+
+def test_the_backend_returns_at_least_the_primary_choice():
+    """A client with no extra samples still has to answer, or the cascade cannot score a turn at all."""
+    from agentdistill.cascade.client import TurnClientBackend
+
+    choices = TurnClientBackend(StubTurnClient(samples=0)).chat([], [], n=3)
+    assert len(choices) == 1
+    assert choices[0]["message"]["content"] == "hi"
+
+
+def test_a_cascade_subject_without_a_teacher_is_refused(tmp_path):
+    """A cascade escalates to the teacher. Without one it would measure the student and call it a cascade."""
+    import typer
+    import yaml
+
+    from agentdistill.cli import _resolve_client
+    from agentdistill.config import ProjectConfig
+
+    (tmp_path / "project.yaml").write_text(yaml.safe_dump({
+        "name": "t",
+        "registry": f"sqlite:///{tmp_path}/r.db",
+        "artifacts": str(tmp_path / "a"),
+        "reports": str(tmp_path / "rep"),
+        "dataset": {"max_seq_len": 512},
+        "train": {"base_model": "m", "max_seq_len": 512},
+    }))
+    cfg = ProjectConfig.load(str(tmp_path / "project.yaml"))
+
+    with pytest.raises(typer.Exit):
+        _resolve_client("cascade:some-adapter:auto", cfg, backend="hf")
+
+
+def test_a_malformed_cascade_subject_is_refused(tmp_path):
+    import typer
+    import yaml
+
+    from agentdistill.cli import _resolve_client
+    from agentdistill.config import ProjectConfig
+
+    (tmp_path / "project.yaml").write_text(yaml.safe_dump({
+        "name": "t",
+        "registry": f"sqlite:///{tmp_path}/r.db",
+        "artifacts": str(tmp_path / "a"),
+        "reports": str(tmp_path / "rep"),
+        "dataset": {"max_seq_len": 512},
+        "train": {"base_model": "m", "max_seq_len": 512},
+        "teacher": {"model": "anthropic/claude-sonnet-5"},
+    }))
+    cfg = ProjectConfig.load(str(tmp_path / "project.yaml"))
+
+    # Two segments rather than three.
+    with pytest.raises(typer.Exit):
+        _resolve_client("cascade:adapter", cfg, backend="hf")
+
+
+@pytest.mark.parametrize("tau", ["1.5", "-0.1", "auto-ish"])
+def test_an_out_of_range_threshold_is_refused(tau):
+    import typer
+
+    from agentdistill.cli import _parse_cascade_tau
+
+    with pytest.raises(typer.Exit):
+        _parse_cascade_tau(tau)
+
+
+def test_a_valid_threshold_parses():
+    from agentdistill.cli import _parse_cascade_tau
+
+    assert _parse_cascade_tau("0.72") == pytest.approx(0.72)
+    assert _parse_cascade_tau("0") == 0.0
+    assert _parse_cascade_tau("1") == 1.0
