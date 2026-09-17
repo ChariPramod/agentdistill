@@ -484,3 +484,68 @@ def test_curation_never_sees_a_rollout(tmp_path, monkeypatch):
         )
     finally:
         reg.close()
+
+
+# --------------------------------------------------------------------------------------------------------------
+# the real stages against the contract they claim to satisfy
+#
+# `Stages` is typed, but the loop's tests drive it with stubs -- so the stubs matched the contract while the real
+# `_onpolicy_stages` did not. `train_sft_continue` is declared to return (run, adapter) and returned only the
+# adapter, which surfaced as "too many values to unpack" partway through a round.
+# --------------------------------------------------------------------------------------------------------------
+
+
+def test_the_real_stage_set_fills_every_slot_in_the_contract(project_config, registry):
+    from agentdistill.cli import _onpolicy_stages
+    from agentdistill.train.onpolicy import RoundCfg, Stages
+
+    stages = _onpolicy_stages(project_config, registry, "t", RoundCfg(), "hf")
+    assert isinstance(stages, Stages)
+    for field in Stages.__dataclass_fields__:
+        assert callable(getattr(stages, field)), f"{field} is not callable"
+
+
+def test_train_sft_continue_returns_a_run_and_an_adapter(project_config, registry, tmp_path, monkeypatch):
+    """Both, because the round records both: a candidate has to be traceable to the run that made it."""
+    from agentdistill.cli import _onpolicy_stages
+    from agentdistill.registry.base import utcnow
+    from agentdistill.train.onpolicy import RoundCfg
+
+    registry.insert_dataset({"id": "ds_rft", "name": "r", "version": 1, "kind": "rft", "filter_config": {},
+                             "n_samples": 4, "n_tokens": 40, "content_hash": "h", "path": str(tmp_path)})
+    registry.insert_dataset({"id": "ds_seed", "name": "s", "version": 1, "kind": "sft", "filter_config": {},
+                             "n_samples": 4, "n_tokens": 40, "content_hash": "h2", "path": str(tmp_path)})
+    registry.insert_training_run({"id": "tr_seed", "dataset_id": "ds_seed", "base_model": "m", "method": "sft",
+                                  "config": {}, "status": "succeeded", "started_at": utcnow()})
+    registry.insert_adapter({"id": "ad_start", "training_run_id": "tr_seed", "name": "student", "version": 1,
+                             "base_model": "m", "path": str(tmp_path / "start")})
+
+    class FakeResult:
+        eval_loss = 0.5
+
+        def to_dict(self):
+            return {"eval_loss": 0.5, "steps": 1}
+
+    seen = {}
+
+    def fake_train_sft(cfg, dataset_path, out_dir, resume_adapter=None, **kw):
+        seen["resume_adapter"] = resume_adapter
+        seen["lr"] = cfg["lr"]
+        return FakeResult()
+
+    monkeypatch.setattr("agentdistill.train.sft.train_sft", fake_train_sft)
+
+    from agentdistill.config import TrainConfig
+
+    project_config.train = TrainConfig(base_model="m", max_seq_len=project_config.dataset.max_seq_len)
+
+    stages = _onpolicy_stages(project_config, registry, "round-1", RoundCfg(), "hf")
+    run_id, adapter_id = stages.train_sft_continue("ad_start", "ds_rft")
+
+    assert registry.get_training_run(run_id) is not None
+    row = next(a for a in registry.list_adapters() if a["id"] == adapter_id)
+    assert row["parent_adapter_id"] == "ad_start"
+    assert row["tag"] == "round-1"
+    # Continuation, not a fresh run, at a third of the configured rate.
+    assert seen["resume_adapter"] == str(tmp_path / "start")
+    assert seen["lr"] == pytest.approx(project_config.train.lr / 3)

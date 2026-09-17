@@ -962,8 +962,10 @@ def _onpolicy_stages(cfg, reg, tag, round_cfg, backend: str = "hf"):
         reg.insert_adapter({
             "id": new_id, "training_run_id": run_id, "name": row["name"], "version": version,
             "base_model": row["base_model"], "path": str(out_dir), "parent_adapter_id": row["id"],
+            "tag": tag,
         })
-        return new_id
+        # (training run, adapter): the round records both, so a candidate can be traced to the run that made it.
+        return run_id, new_id
 
     def _merge(adapter):
         """Merge for the DPO stage, verified against the adapter it came from.
