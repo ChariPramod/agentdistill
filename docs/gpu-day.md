@@ -67,11 +67,27 @@ What the rehearsal cannot cover: vLLM itself — no real tool parser, no LoRA lo
 anything CUDA. That is what `scripts/serve_smoke.sh` on the real box is for, and it is the first thing to run
 there.
 
-Every rehearsal so far has found something. In order: the fixture tokenizer has no weights to train; 4-bit
-quantization needs CUDA; `max_seq_len: 1024` silently dropped every trajectory in curation; five-task eval sets
-are below `eval compare`'s minimum of eight; a uv-created venv has no `pip` in it; `train.base_model` as a
-relative path resolved against the working directory instead of the config; and `dataset latest` printed an id
-where `train sft` accepted only a name. All seven would have surfaced on rented hardware, mid-session.
+Every rehearsal so far has found something, and each would otherwise have surfaced on rented hardware,
+mid-session, after the stages before it had already run:
+
+| Stage it died at | What was wrong |
+|---|---|
+| `env` | A uv-created venv has no `pip` in it |
+| `sft` | The fixture tokenizer has no weights to train |
+| `sft` | 4-bit quantization needs CUDA |
+| `sft` | `dataset latest` prints an id; `train sft` accepted only a name |
+| `merge` | `train sft --tag` was accepted and dropped, so `adapter latest --tag` found nothing |
+| `merge` | `torch_dtype` is deprecated in transformers 5.x, and `device_map="auto"` segfaults on MPS |
+| `merge` | `adapter merge` and `train onpolicy` hardcoded the vLLM backend |
+| `base_check` | `train.base_model` as a relative path resolved against the CWD, not the config |
+| `eval_teach` | **`eval run teacher` was evaluating the base model** |
+| `cmp_sft` | `eval latest --subject-tag` does not exist; the flag is `--tag` |
+| curation | `max_seq_len: 1024` silently dropped every trajectory |
+| `cmp_sft` | Five-task eval sets are below `eval compare`'s minimum of eight |
+
+The teacher one is the reason to take rehearsals seriously. It was not a crash: `eval run teacher` loaded
+`train.base_model`, ran it, and wrote the results under the subject name "teacher". Every student-against-teacher
+comparison in every report would have been a student-against-base comparison, and nothing would have said so.
 
 ## On the day
 
