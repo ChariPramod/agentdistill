@@ -120,3 +120,43 @@ def test_no_stage_hardcodes_the_base_model():
     text = SCRIPT.read_text()
     assert "config get train.base_model" in text
     assert not re.search(r"--base-model\s+\S+/\S+", text)
+
+
+def test_every_flag_the_script_passes_exists(tmp_path):
+    """A flag that does not exist fails the stage, on the box, after the stages before it have already run.
+
+    The subcommand check above does not catch this: `eval run --logprobs` names a command that exists and a
+    flag that did not. Four such flags were found this way, including the two the calibration stage depends on.
+    """
+    import re
+    import sys
+
+    from typer.main import get_command
+
+    from agentdistill.cli import app
+
+    root = get_command(app)
+    groups = {n: set(getattr(c, "commands", {})) for n, c in root.commands.items()}  # type: ignore[attr-defined]
+
+    out = dry_run(tmp_path)
+    missing, checked = [], set()
+    for line in out.splitlines():
+        if not line.startswith("agentdistill "):
+            continue
+        parts = line.split()[1:]
+        head = parts[0]
+        cmd = parts[:2] if head in groups and len(parts) > 1 and parts[1] in groups[head] else parts[:1]
+        flags = frozenset(p for p in parts if p.startswith("--"))
+        if (tuple(cmd), flags) in checked:
+            continue
+        checked.add((tuple(cmd), flags))
+
+        help_text = subprocess.run(
+            [sys.executable, "-m", "agentdistill.cli", *cmd, "--help"],
+            capture_output=True, text=True, check=False,
+        ).stdout
+        # Rich wraps help output, so collapse whitespace before looking for a flag.
+        collapsed = re.sub(r"\s+", " ", help_text)
+        missing += [f"`{' '.join(cmd)}` has no {f}" for f in sorted(flags) if f not in collapsed]
+
+    assert not missing, "the GPU day script passes flags that do not exist:\n  " + "\n  ".join(missing)

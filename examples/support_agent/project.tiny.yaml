@@ -1,0 +1,74 @@
+# Tiny mode: the CPU rehearsal.
+#
+#   AGENTDISTILL_TINY=1 bash scripts/gpu_day.sh
+#
+# Every stage of the GPU day runs on a laptop with the fixture tokenizer, five tasks, and N=1. The numbers this
+# produces are garbage and the report says so. The execution path is real, and that is the point: the rehearsal
+# finds the registry query that assumed a field only vLLM populates, the path that only exists after
+# quantization, the report key that is None when DPO was discarded. Each of those costs minutes here and an hour
+# of rented GPU there.
+#
+# Expected wall clock: 20 to 40 minutes, dominated by the two training stages.
+name: support-agent-tiny
+registry: sqlite:///.agentdistill/registry.tiny.db
+artifacts: ./artifacts/tiny
+reports: ./reports/tiny
+
+sources:
+  - type: jsonl
+    path: traces-train.jsonl
+
+curate:
+  # The same filters as the real config. A rehearsal that skipped filters would not rehearse curation.
+  filters: [outcome, schema_valid, no_error_loops, length, exact_dedupe, near_dedupe, decontaminate, stratify]
+  near_dedupe_threshold: 0.85
+  min_turns: 1
+  max_turns: 40
+  # Five tasks cannot support eight clusters; two is the smallest number that still exercises per-cluster paths.
+  clusters: 2
+  cap_per_cluster: 20
+  embeddings:
+    provider: hash
+    dim: 128
+
+dataset:
+  max_seq_len: 2048
+  window_turns: 6
+
+train:
+  # A randomly-initialized Llama-shaped model over the fixture tokenizer, built by
+  # `python scripts/make_tiny_model.py`. It cannot do the task and is not supposed to: the rehearsal checks that
+  # every stage executes, not that anything learns. The fixture tokenizer alone is enough to *build* a dataset
+  # but has no weights to train, which is the first thing the rehearsal found.
+  base_model: ../../artifacts/tiny/model
+  method: sft
+  # No 4-bit on a laptop: bitsandbytes needs CUDA, and a rehearsal that fell over on the quantization config
+  # would be failing on the one thing it cannot rehearse.
+  quantization: null
+  max_seq_len: 2048
+  epochs: 1
+  lr: 1.0e-4
+  seed: 17
+  tool_parser:
+    family: agentdistill_fixture
+
+eval:
+  eval_set: support-holdout-tiny
+  n_per_task: 1
+  policy: strict
+  grader: {type: predicate}
+
+cascade:
+  # One sample: the agreement feature is NaN at k=0, and a rehearsal should exercise the feature being present.
+  k_samples: 1
+
+onpolicy:
+  k_rollouts: 2
+
+serve:
+  # fp8 writes a marker and nothing else, so this stage runs on a laptop unchanged.
+  quantization: fp8
+  vllm_url: http://127.0.0.1:8000
+
+router:
+  seed: 0

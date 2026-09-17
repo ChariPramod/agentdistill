@@ -4,11 +4,33 @@
 #
 #   bash scripts/gpu_day.sh                  # run everything not yet done
 #   AGENTDISTILL_DRY_RUN=1 bash scripts/...  # print the plan, run nothing
+#   AGENTDISTILL_TINY=1 bash scripts/...     # the CPU rehearsal: same path, garbage numbers
 #   rm artifacts/gpu_day/sft.done            # force one stage to run again
 #
 # Every command here exists and is tested on CPU. The day should be reading a log, not writing code.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+# Tiny mode runs every stage on a laptop with the fixture tokenizer, five tasks and N=1. The numbers are
+# garbage; the execution path is real. Run it before the GPU day, because the failures it finds -- a query that
+# assumed a vLLM-only field, a path that only exists after quantization -- cost minutes here and an hour there.
+if [[ "${AGENTDISTILL_TINY:-0}" == "1" ]]; then
+  export AGENTDISTILL_CONFIG="${AGENTDISTILL_CONFIG:-examples/support_agent/project.tiny.yaml}"
+  export AGENTDISTILL_EVAL_BACKEND="${AGENTDISTILL_EVAL_BACKEND:-hf}"
+  export AGENTDISTILL_FAKE_VLLM=1
+  EVAL_SET="${EVAL_SET:-support-holdout-tiny}"
+  UNSEEN_SET="${UNSEEN_SET:-support-unseen-tiny}"
+  CALIB_SET="${CALIB_SET:-support-calib-tiny}"
+  N_EVAL="${N_EVAL:-1}"
+  echo "== tiny mode: CPU rehearsal, the numbers are not meaningful"
+  # Idempotent: builds the tiny model and the ten-task eval sets if they are not already there. Skipped in a
+  # dry run, which is meant to print a plan without touching anything.
+  if [[ "${AGENTDISTILL_DRY_RUN:-0}" == "1" ]]; then
+    echo "bash scripts/tiny_setup.sh"
+  else
+    bash scripts/tiny_setup.sh
+  fi
+fi
 
 export AGENTDISTILL_CONFIG="${AGENTDISTILL_CONFIG:-examples/support_agent/project.yaml}"
 CONFIG_ARG=(--config "$AGENTDISTILL_CONFIG")
@@ -18,6 +40,8 @@ EVAL_SET="${EVAL_SET:-support-holdout-v1}"
 UNSEEN_SET="${UNSEEN_SET:-support-unseen-v1}"
 CALIB_SET="${CALIB_SET:-support-calib-v1}"
 N_EVAL="${N_EVAL:-5}"
+BACKEND="${AGENTDISTILL_EVAL_BACKEND:-vllm}"
+TINY="${AGENTDISTILL_TINY:-0}"
 
 mkdir -p artifacts/gpu_day logs
 
@@ -41,6 +65,13 @@ s_env() {
     echo 'pip install -e ".[train,serve]" && python -c "check torch/vllm/trl/peft"'
     return 0
   fi
+  if [[ "$TINY" == "1" ]]; then
+    # No vLLM and no CUDA on a laptop, and asking for them would fail the rehearsal on the one thing it is not
+    # rehearsing.
+    pip install -e ".[train]"
+    python -c 'import torch, trl, peft; print("torch", torch.__version__, "trl/peft ok (tiny mode)")'
+    return 0
+  fi
   pip install -e ".[train,serve]"
   python - <<'PY'
 import torch
@@ -59,23 +90,35 @@ PY
 s_base_check()  { ad base-check "$BASE_MODEL" "${CONFIG_ARG[@]}"; }
 s_sft()         { ad train sft "$(cap dataset dataset latest --kind sft "${CONFIG_ARG[@]}")" --tag "$TAG" "${CONFIG_ARG[@]}"; }
 s_merge()       { ad adapter merge "$(cap adapter adapter latest --tag "$TAG" "${CONFIG_ARG[@]}")" "${CONFIG_ARG[@]}"; }
+# fp8 writes a marker and nothing else, so quantize runs unchanged on a laptop. AWQ does not, and tiny mode
+# configures fp8 rather than skipping the stage -- a skipped stage rehearses nothing.
 
-s_eval_base()   { ad eval run base --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend vllm --tag "$TAG" "${CONFIG_ARG[@]}"; }
-s_eval_sft()    { ad eval run "$(cap adapter adapter latest --tag "$TAG" "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend vllm --tag "$TAG" "${CONFIG_ARG[@]}"; }
+s_eval_base()   { ad eval run base --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --tag "$TAG" "${CONFIG_ARG[@]}"; }
+s_eval_sft()    { ad eval run "$(cap adapter adapter latest --tag "$TAG" "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --tag "$TAG" "${CONFIG_ARG[@]}"; }
 s_eval_teach()  { ad eval run teacher --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --tag "$TAG" "${CONFIG_ARG[@]}"; }
 s_cmp_sft()     { ad eval compare "$(cap ev eval latest --subject-tag "$TAG" "${CONFIG_ARG[@]}")" "$(cap ev eval latest --subject base "${CONFIG_ARG[@]}")" --out artifacts/gpu_day/cmp_sft.md "${CONFIG_ARG[@]}"; }
 
 s_onpolicy()    { ad train onpolicy "$(cap adapter adapter latest --tag "$TAG" "${CONFIG_ARG[@]}")" --rounds 1 --tag "$TAG-r1" "${CONFIG_ARG[@]}"; }
-s_eval_r1()     { ad eval run "$(cap adapter adapter latest --tag "$TAG-r1" "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend vllm --tag "$TAG-r1" "${CONFIG_ARG[@]}"; }
-s_unseen()      { ad eval run "$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}")" --eval-set "$UNSEEN_SET" --n "$N_EVAL" --policy strict --backend vllm --tag "$TAG" "${CONFIG_ARG[@]}"; }
+s_eval_r1()     { ad eval run "$(cap adapter adapter latest --tag "$TAG-r1" "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --tag "$TAG-r1" "${CONFIG_ARG[@]}"; }
+s_unseen()      { ad eval run "$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}")" --eval-set "$UNSEEN_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --tag "$TAG" "${CONFIG_ARG[@]}"; }
 
-s_logprobs()    { ad eval run "$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}")" --eval-set "$CALIB_SET" --n 3 --policy fuzzy --backend vllm --logprobs --samples 3 --tag "$TAG-calib" "${CONFIG_ARG[@]}"; }
+s_logprobs()    { ad eval run "$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}")" --eval-set "$CALIB_SET" --n 3 --policy fuzzy --backend "$BACKEND" --logprobs --samples 3 --tag "$TAG-calib" "${CONFIG_ARG[@]}"; }
 s_calibrate()   { ad calibrate "$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}")" --from-eval "$(cap ev eval latest --eval-set "$CALIB_SET" "${CONFIG_ARG[@]}")" "${CONFIG_ARG[@]}"; }
-s_cascade_ver() { ad eval run "cascade:$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}"):auto" --eval-set "$EVAL_SET" --n 3 --policy fuzzy --backend vllm --verify-threshold --tag "$TAG" "${CONFIG_ARG[@]}"; }
+s_cascade_ver() { ad eval run "cascade:$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}"):auto" --eval-set "$EVAL_SET" --n 3 --policy fuzzy --backend "$BACKEND" --verify-threshold --tag "$TAG" "${CONFIG_ARG[@]}"; }
 
 s_quantize()    { ad adapter quantize "$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}")" --method "$QUANT" "${CONFIG_ARG[@]}"; }
-s_eval_quant()  { ad eval run "$(cap adapter adapter latest --quantized "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" --n 3 --policy strict --backend vllm --tag "$TAG" "${CONFIG_ARG[@]}"; }
-s_serve_smoke() { if [[ "$DRY" == "1" ]]; then echo "bash scripts/serve_smoke.sh"; else bash scripts/serve_smoke.sh; fi; }
+s_eval_quant()  { ad eval run "$(cap adapter adapter latest --quantized "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" --n 3 --policy strict --backend "$BACKEND" --tag "$TAG" "${CONFIG_ARG[@]}"; }
+s_serve_smoke() {
+  if [[ "$DRY" == "1" ]]; then echo "bash scripts/serve_smoke.sh"; return 0; fi
+  if [[ "$TINY" == "1" ]]; then
+    # The test suite's fake vLLM stands in for the real one, so the gateway, both dialects and the request-log
+    # assertion are all still exercised. What is not exercised is vLLM itself, which is the whole point of
+    # running the real smoke test on the real box afterwards.
+    AGENTDISTILL_FAKE_VLLM=1 bash scripts/serve_smoke.sh
+    return $?
+  fi
+  bash scripts/serve_smoke.sh
+}
 s_report()      { ad report --out artifacts/gpu_day/report.html --include-run-ids "${CONFIG_ARG[@]}"; }
 
 stage env          s_env

@@ -93,3 +93,29 @@ async def models():
 @app.get("/health")
 async def health():
     return {"ok": True}
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Serve the fake, for tiny mode's rehearsal of the serving path.
+
+    Running as a real server rather than through a TestClient is deliberate: it is what lets `serve_smoke.sh`
+    exercise the gateway over a socket, in both dialects, exactly as it will on the GPU box. What this cannot
+    rehearse is vLLM -- no tool parser, no LoRA loading, no template. Those are what the real smoke test on real
+    hardware is for.
+    """
+    import argparse
+
+    import uvicorn
+
+    ap = argparse.ArgumentParser(description=main.__doc__)
+    ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--host", default="127.0.0.1")
+    args = ap.parse_args(argv)
+
+    print(f"fake vLLM on {args.host}:{args.port} — this is not vLLM and proves nothing about vLLM")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -7,6 +7,7 @@ bias is corrected where the data supports it, and no code path prints a judge nu
 from __future__ import annotations
 
 import json
+import math
 
 import numpy as np
 import pytest
@@ -303,3 +304,115 @@ def test_build_judge_prompt_demands_json():
     assert messages[0]["role"] == "system"
     assert '"success"' in messages[0]["content"]
     assert "polite reply that failed" in messages[0]["content"], "the judge must be warned about style bias"
+
+
+# --------------------------------------------------------------------------------------------------------------
+# from a stored eval turn to a feature vector
+#
+# This path had no test and did not work: `calibrate` read `record["features"]`, which `label_rollouts` never
+# set, so the command could not fit a gate however good its input was. The CPU rehearsal found it.
+# --------------------------------------------------------------------------------------------------------------
+
+
+def _stored_turn(with_logprobs: bool = True, with_samples: bool = True) -> dict:
+    """An assistant message shaped the way the eval harness stores it."""
+    call = {"id": "c1", "type": "function",
+            "function": {"name": "issue_refund", "arguments": '{"order_id": "A1"}'}}
+    message: dict = {"role": "assistant", "content": None, "tool_calls": [call]}
+    if with_logprobs:
+        text = '{"order_id": "A1"}'
+        message["logprobs"] = {"content": [
+            {"token": ch, "logprob": -0.1, "top_logprobs": [{"token": ch, "logprob": -0.1}]}
+            for ch in text
+        ]}
+        message["text"] = text
+    if with_samples:
+        message["samples"] = [{"role": "assistant", "content": None, "tool_calls": [call]}]
+    return message
+
+
+def test_a_stored_turn_becomes_a_scorable_choice():
+    from agentdistill.cascade.labels import as_choice
+
+    choice, samples = as_choice(_stored_turn())
+    assert set(choice) == {"message", "logprobs", "text"}
+    # The extras must not leak into the message, or the call signature they feed would differ from serving.
+    assert "logprobs" not in choice["message"]
+    assert "samples" not in choice["message"]
+    assert choice["message"]["tool_calls"][0]["function"]["name"] == "issue_refund"
+    assert len(samples) == 1 and "message" in samples[0]
+
+
+def test_features_are_computed_from_a_stored_turn():
+    from agentdistill.cascade.labels import features_for
+
+    features = features_for(_stored_turn(), cluster_prior=0.7, turn_idx=2, prefix_tokens=400)
+    assert features.has_tool_call == 1
+    assert features.n_tool_calls == 1
+    assert features.cluster_prior == pytest.approx(0.7)
+    assert features.turn_idx == 2
+    assert features.prefix_tokens == 400
+    assert not math.isnan(features.mean_logprob)
+    # The sample repeated the same call, so agreement is 1.0 rather than missing.
+    assert features.agreement == pytest.approx(1.0)
+
+
+def test_a_disagreeing_sample_lowers_agreement():
+    from agentdistill.cascade.labels import features_for
+
+    turn = _stored_turn()
+    turn["samples"] = [{"role": "assistant", "content": "I am not sure.", "tool_calls": None}]
+    assert features_for(turn).agreement == pytest.approx(0.0)
+
+
+def test_attach_features_skips_turns_without_logprobs():
+    """Dropped rather than filled with NaN: an entirely missing row teaches the calibrator nothing and
+    dilutes every metric computed over it."""
+    from agentdistill.cascade.labels import attach_features
+
+    records = [
+        {"task_id": "t1", "turn_index": 0, "good": True, "message": _stored_turn()},
+        {"task_id": "t2", "turn_index": 0, "good": False, "message": _stored_turn(with_logprobs=False)},
+    ]
+    assert attach_features(records) == 1
+    assert records[0].get("features") is not None
+    assert records[1].get("features") is None
+
+
+def test_label_rollouts_carries_the_prefix_each_turn_was_generated_from():
+    """`prefix_tokens` is a feature, so a turn's position in a long trajectory has to survive labelling."""
+    from agentdistill.cascade.labels import label_rollouts
+
+    messages = [
+        {"role": "user", "content": "refund order A1"},
+        _stored_turn(),
+        {"role": "tool", "tool_call_id": "c1", "content": "{}"},
+        {"role": "assistant", "content": "Done."},
+    ]
+    records, _ = label_rollouts([{"id": "r1", "task_id": "t1", "success": True, "messages": messages}], {})
+    assert records
+    assert all("prefix" in r for r in records)
+    first = next(r for r in records if r["turn_index"] == 1)
+    assert first["prefix"] == messages[:1]
+
+
+def test_the_whole_path_produces_a_matrix_the_calibrator_can_fit():
+    """End to end: stored turns in, a finite feature matrix out, in the configured column order."""
+    import numpy as np
+
+    from agentdistill.cascade.features import DEFAULT_FEATURES, matrix
+    from agentdistill.cascade.labels import attach_features, label_rollouts
+
+    rollouts = []
+    for i in range(12):
+        messages = [{"role": "user", "content": f"task {i}"}, _stored_turn()]
+        rollouts.append({"id": f"r{i}", "task_id": f"t{i}", "success": i % 2 == 0, "messages": messages})
+
+    records, stats = label_rollouts(rollouts, {})
+    assert attach_features(records) == len(records)
+
+    X = matrix([r["features"] for r in records], list(DEFAULT_FEATURES))
+    assert X.shape == (len(records), len(DEFAULT_FEATURES))
+    # Some columns are legitimately NaN (no text tokens here); the point is that the matrix builds at all.
+    assert np.isfinite(X).any()
+    assert stats["n"] == len(records)

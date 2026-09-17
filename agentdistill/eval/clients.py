@@ -85,7 +85,11 @@ class ScriptedTurnClient:
 
 
 class HfTurnClient:
-    """`transformers.generate`. Greedy by default so eval is reproducible."""
+    """`transformers.generate`. Greedy by default so eval is reproducible.
+
+    `logprobs` and `n_samples` exist so the CPU rehearsal can run the calibration stage. They are correct but
+    slow -- one forward pass per sample, no batching -- and on real hardware the vLLM client is the one to use.
+    """
 
     def __init__(
         self,
@@ -95,10 +99,16 @@ class HfTurnClient:
         family: str | None = None,
         max_new_tokens: int = 256,
         temperature: float = 0.0,
+        logprobs: bool = False,
+        n_samples: int = 0,
+        top_logprobs: int = 5,
+        seed: int = 0,
     ) -> None:
         self.model, self.tok = model, tok
         self.parser_name, self.family = parser_name, family
         self.max_new_tokens, self.temperature = max_new_tokens, temperature
+        self.logprobs, self.n_samples, self.top_logprobs = logprobs, n_samples, top_logprobs
+        self.seed = seed
 
     def next_turn(self, messages: list[dict], tools: list[dict]) -> dict:
         import torch
@@ -115,10 +125,76 @@ class HfTurnClient:
             kwargs.update(do_sample=True, temperature=self.temperature)
         else:
             kwargs.update(do_sample=False)
+        if self.logprobs:
+            kwargs.update(output_scores=True, return_dict_in_generate=True)
+
         with torch.no_grad():
             out = self.model.generate(**enc, **kwargs)
-        text = self.tok.decode(out[0, enc["input_ids"].shape[1] :], skip_special_tokens=False)
-        return parse_assistant(text, self.tok, self.parser_name, self.family)
+
+        sequences = out.sequences if self.logprobs else out
+        prompt_len = enc["input_ids"].shape[1]
+        text = self.tok.decode(sequences[0, prompt_len:], skip_special_tokens=False)
+        turn = parse_assistant(text, self.tok, self.parser_name, self.family)
+
+        if self.logprobs:
+            turn["logprobs"] = {"content": _hf_token_logprobs(
+                out.scores, sequences[0, prompt_len:], self.tok, self.top_logprobs
+            )}
+        if self.n_samples:
+            turn["samples"] = self._extra_samples(enc, messages, tools)
+        return turn
+
+    def _extra_samples(self, enc: Any, messages: list[dict], tools: list[dict]) -> list[dict]:
+        """Additional sampled turns, for the agreement feature.
+
+        Sampled rather than greedy: identical greedy turns would make agreement a constant 1.0 and the feature
+        would carry no information at all.
+        """
+        import torch
+
+        out: list[dict] = []
+        for i in range(self.n_samples):
+            # Seeded per sample so a rerun of the eval draws the same k turns; an unseeded agreement feature
+            # would move between runs and the gate fitted on it would not be reproducible.
+            torch.manual_seed(self.seed + i)
+            with torch.no_grad():
+                seq = self.model.generate(
+                    **enc,
+                    max_new_tokens=self.max_new_tokens,
+                    pad_token_id=self.tok.pad_token_id or self.tok.eos_token_id,
+                    do_sample=True,
+                    temperature=max(self.temperature, 0.7),
+                    top_p=0.95,
+                )
+            text = self.tok.decode(seq[0, enc["input_ids"].shape[1]:], skip_special_tokens=False)
+            out.append(parse_assistant(text, self.tok, self.parser_name, self.family))
+        return out
+
+
+def _hf_token_logprobs(scores: Any, tokens: Any, tok: Any, top_k: int) -> list[dict]:
+    """Per-token logprobs in the OpenAI shape the feature extractor reads.
+
+    One shape for both backends, so a gate fitted on vLLM output and one fitted on transformers output are
+    fitted on the same columns.
+    """
+    import torch
+
+    content = []
+    for step, logits in enumerate(scores):
+        if step >= len(tokens):
+            break
+        logprobs = torch.log_softmax(logits[0].float(), dim=-1)
+        token_id = int(tokens[step])
+        top = torch.topk(logprobs, k=min(top_k, logprobs.shape[-1]))
+        content.append({
+            "token": tok.decode([token_id]),
+            "logprob": float(logprobs[token_id]),
+            "top_logprobs": [
+                {"token": tok.decode([int(i)]), "logprob": float(v)}
+                for v, i in zip(top.values.tolist(), top.indices.tolist(), strict=True)
+            ],
+        })
+    return content
 
 
 class VllmOfflineTurnClient:
@@ -140,6 +216,9 @@ class VllmOfflineTurnClient:
         temperature: float = 0.0,
         max_model_len: int | None = None,
         seed: int = 0,
+        logprobs: bool = False,
+        n_samples: int = 0,
+        top_logprobs: int = 5,
     ) -> None:
         from vllm import LLM, SamplingParams
         from vllm.lora.request import LoRARequest
@@ -154,7 +233,15 @@ class VllmOfflineTurnClient:
             seed=seed,
         )
         self.lora = LoRARequest("student", 1, lora_path) if lora_path else None
-        self.sp = SamplingParams(temperature=temperature, max_tokens=max_new_tokens, seed=seed or None)
+        self.sp = SamplingParams(
+            temperature=temperature, max_tokens=max_new_tokens, seed=seed or None,
+            logprobs=top_logprobs if logprobs else None,
+        )
+        # Sampled rather than greedy: k identical greedy turns would make the agreement feature a constant.
+        self.sample_sp = SamplingParams(
+            n=n_samples, temperature=0.8, top_p=0.95, max_tokens=max_new_tokens, seed=seed or None
+        ) if n_samples else None
+        self.logprobs, self.n_samples = logprobs, n_samples
         self.tok, self.parser_name, self.family = tok, parser_name, family
 
     def _render(self, messages: list[dict], tools: list[dict]) -> str:
@@ -163,13 +250,40 @@ class VllmOfflineTurnClient:
         )
 
     def next_turn(self, messages: list[dict], tools: list[dict]) -> dict:
-        out = self.llm.generate([self._render(messages, tools)], self.sp, lora_request=self.lora)
-        return parse_assistant(out[0].outputs[0].text, self.tok, self.parser_name, self.family)
+        prompt = self._render(messages, tools)
+        out = self.llm.generate([prompt], self.sp, lora_request=self.lora)
+        turn = parse_assistant(out[0].outputs[0].text, self.tok, self.parser_name, self.family)
+        if self.logprobs:
+            turn["logprobs"] = {"content": _vllm_token_logprobs(out[0].outputs[0])}
+        if self.sample_sp is not None:
+            extra = self.llm.generate([prompt], self.sample_sp, lora_request=self.lora)
+            turn["samples"] = [
+                parse_assistant(o.text, self.tok, self.parser_name, self.family) for o in extra[0].outputs
+            ]
+        return turn
 
     def next_turns_batch(self, prompts: list[tuple[list[dict], list[dict]]]) -> list[dict]:
         texts = [self._render(m, t) for m, t in prompts]
         outs = self.llm.generate(texts, self.sp, lora_request=self.lora)
         return [parse_assistant(o.outputs[0].text, self.tok, self.parser_name, self.family) for o in outs]
+
+
+def _vllm_token_logprobs(output: Any) -> list[dict]:
+    """vLLM's per-token logprobs, reshaped to the OpenAI form the feature extractor reads."""
+    content = []
+    for token_id, entry in zip(output.token_ids, output.logprobs or [], strict=False):
+        if not entry:
+            continue
+        chosen = entry.get(token_id)
+        content.append({
+            "token": getattr(chosen, "decoded_token", None) or str(token_id),
+            "logprob": float(getattr(chosen, "logprob", float("nan"))) if chosen else float("nan"),
+            "top_logprobs": [
+                {"token": getattr(v, "decoded_token", None) or str(k), "logprob": float(v.logprob)}
+                for k, v in entry.items()
+            ],
+        })
+    return content
 
 
 class HttpTurnClient:

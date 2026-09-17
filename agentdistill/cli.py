@@ -637,6 +637,7 @@ def train_sft_cmd(
     lr_scale: float = typer.Option(
         1.0, help="Multiply the configured learning rate. Continuation wants roughly a third."
     ),
+    tag: str | None = typer.Option(None, help="Group with a session, so `adapter latest --tag` finds it."),
 ) -> None:
     """LoRA / QLoRA supervised fine-tuning on a built dataset.
 
@@ -999,7 +1000,9 @@ def _resolve_grader(cfg: Any):
     return label_grader
 
 
-def _resolve_client(subject: str, cfg: Any, backend: str, tok: Any = None):
+def _resolve_client(
+    subject: str, cfg: Any, backend: str, tok: Any = None, logprobs: bool = False, samples: int = 0
+):
     """Turn a subject string into a TurnClient.
 
     Subjects: an adapter name, `base`, `teacher`, `recorded`, or `http:<model>@<url>`.
@@ -1016,7 +1019,7 @@ def _resolve_client(subject: str, cfg: Any, backend: str, tok: Any = None):
         if not url:
             err.print("[red]http subjects look like http:<model>@<base-url>[/red]")
             raise typer.Exit(code=1)
-        return HttpTurnClient(base_url=url, model=remote_model)
+        return HttpTurnClient(base_url=url, model=remote_model, logprobs=logprobs)
 
     if subject == "recorded":
         # The control: replays the recorded turns. Used to prove the harness reproduces a trace.
@@ -1040,7 +1043,10 @@ def _resolve_client(subject: str, cfg: Any, backend: str, tok: Any = None):
     if backend == "vllm":
         from agentdistill.eval.clients import VllmOfflineTurnClient
 
-        return VllmOfflineTurnClient(base_model, tok, parser_name, family, lora_path=adapter_path)
+        return VllmOfflineTurnClient(
+            base_model, tok, parser_name, family, lora_path=adapter_path,
+            logprobs=logprobs, n_samples=samples,
+        )
 
     from agentdistill.data.dataset import load_tokenizer
 
@@ -1055,7 +1061,7 @@ def _resolve_client(subject: str, cfg: Any, backend: str, tok: Any = None):
         from peft import PeftModel
 
         loaded = PeftModel.from_pretrained(loaded, adapter_path)
-    return HfTurnClient(loaded, tok, parser_name, family)
+    return HfTurnClient(loaded, tok, parser_name, family, logprobs=logprobs, n_samples=samples)
 
 
 @eval_app.command("run")
@@ -1068,6 +1074,16 @@ def eval_run(
     max_turns: int = typer.Option(12),
     fuzzy_threshold: float = typer.Option(0.92),
     store_messages: bool = typer.Option(True, help="Keep full trajectories for hand review."),
+    logprobs: bool = typer.Option(
+        False, help="Record per-token logprobs. The confidence gate's features come from these."
+    ),
+    samples: int = typer.Option(
+        0, help="Extra sampled turns per turn, for the gate's agreement feature. 3 is the usual figure."
+    ),
+    verify_threshold: bool = typer.Option(
+        False, help="For a cascade subject: measure the escalation rate the chosen threshold actually produces."
+    ),
+    tag: str | None = typer.Option(None, help="Group this run with a session, so `eval latest --tag` finds it."),
     config: str = typer.Option("project.yaml"),
 ) -> None:
     """Evaluate a subject on an eval set, replaying tool results from the recorded traces."""
@@ -1095,7 +1111,14 @@ def eval_run(
         raise typer.Exit(code=1)
 
     grader = _resolve_grader(cfg)
-    client = _resolve_client(subject, cfg, backend)
+    client = _resolve_client(subject, cfg, backend, logprobs=logprobs, samples=samples)
+
+    if (logprobs or samples) and not store_messages:
+        err.print(
+            "[red]--logprobs and --samples are pointless with --no-store-messages[/red]: the gate's features "
+            "live on the stored trajectories, and discarding them discards the run's only purpose."
+        )
+        raise typer.Exit(code=1)
 
     spec = RunSpec(
         subject=subject,
@@ -1104,6 +1127,7 @@ def eval_run(
         policy=policy,
         max_turns=max_turns,
         fuzzy_threshold=fuzzy_threshold,
+        tag=tag,
     )
     console.print(f"[bold]eval[/bold] {subject} on {name}: {len(traces_by_task)} tasks x {spec.n_per_task}")
 
@@ -1124,8 +1148,54 @@ def eval_run(
     run = reg.get_eval_run(run_id)
     console.print()
     console.print(render_run(run))
+    if verify_threshold:
+        _report_threshold_verification(reg, run, subject)
     console.print()
     console.print(f"[dim]compare with: agentdistill eval compare {run_id[:10]} <other-run>[/dim]")
+
+
+def _report_threshold_verification(reg: Any, run: dict, subject: str) -> None:
+    """Compare the escalation rate a cascade run actually produced against the rate its threshold predicted.
+
+    The predicted rate comes from calibration data, where the student answered every turn. In a real cascade the
+    teacher answers the low-confidence ones, so later turns build on a different prefix and the student faces a
+    different distribution. The two rates diverging is the expected outcome, not a bug -- but it is the
+    difference between a cost saving that was estimated and one that was measured, and the report should never
+    quote the estimate when the measurement exists.
+    """
+    metrics = run.get("metrics") or {}
+    measured = metrics.get("escalation_rate")
+    if measured is None:
+        console.print(
+            "[yellow]--verify-threshold: this run recorded no escalation rate[/yellow], which means the "
+            "subject was not a cascade. Verification needs a `cascade:<adapter>:<tau>` subject."
+        )
+        return
+
+    from agentdistill.registry.select import NoMatch, latest_calibration
+
+    adapter = subject.split(":")[1] if subject.startswith("cascade:") else subject
+    try:
+        row = latest_calibration(reg, adapter_id=adapter)
+    except (NoMatch, LookupError):
+        row = None
+    predicted = ((row or {}).get("report") or {}).get("predicted_escalation_rate")
+
+    console.print()
+    console.print(f"[bold]threshold verification[/bold]  measured escalation {measured:.1%}")
+    if predicted is None:
+        console.print(
+            "  [dim]no predicted rate on file to compare against; the calibration artifact did not record one."
+            "[/dim]"
+        )
+        return
+    drift = (measured - predicted) * 100
+    console.print(f"  predicted {predicted:.1%}   drift {drift:+.1f} pp")
+    if abs(drift) > 10:
+        console.print(
+            "  [yellow]the measured rate is far from the predicted one.[/yellow] The cost model should use "
+            "the measured rate; the predicted one was computed on turns the student answered alone."
+        )
 
 
 def _run_recorded(reg, es, traces_by_task, grader, spec, store_messages, tick):
@@ -1339,7 +1409,7 @@ def calibrate(
 
     from agentdistill.cascade.calibrate import fit_calibrator, save
     from agentdistill.cascade.features import matrix
-    from agentdistill.cascade.labels import label_rollouts
+    from agentdistill.cascade.labels import attach_features, label_rollouts
     from agentdistill.cascade.threshold import choose_threshold, verification_points
 
     cfg = _load(config)
@@ -1385,13 +1455,24 @@ def calibrate(
         )
 
     # Without stored logprobs there are no confidence features to fit on.
-    if not any(r.get("features") for r in records):
+    attached = attach_features(records)
+    if not attached:
         err.print(
             "[red]no per-turn logprobs in that eval run[/red]. The gate's features come from "
-            "`eval run <adapter> --logprobs --samples 3`, which needs the vLLM backend on a GPU. "
+            "`eval run <adapter> --logprobs --samples 3`. "
             "See scripts/gpu_day.sh, stage `logprobs`."
         )
         raise typer.Exit(code=1)
+
+    # Turns without logprobs are dropped rather than given a vector of NaN: a row that is entirely missing
+    # teaches the calibrator nothing and dilutes every metric computed over it.
+    scorable = [r for r in records if r.get("features") is not None]
+    if len(scorable) < len(records):
+        console.print(
+            f"[yellow]{len(records) - len(scorable)} of {len(records)} turns carry no logprobs[/yellow] "
+            f"and were dropped; the gate is fitted on {len(scorable)}."
+        )
+    records = scorable
 
     features = [r["features"] for r in records]
     y = np.array([int(r["good"]) for r in records])

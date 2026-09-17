@@ -34,7 +34,14 @@ wait_for() {  # wait_for <url> <attempts> <sleep> <what>
 }
 
 echo "==> starting vLLM"
-bash scripts/serve_vllm.sh > logs/vllm.log 2>&1 &
+if [[ "${AGENTDISTILL_FAKE_VLLM:-0}" == "1" ]]; then
+  # The test suite's fake vLLM, so the rest of this script -- the gateway, both dialects, the request log --
+  # runs on a laptop. It does not rehearse vLLM; nothing on a laptop can.
+  echo "    (fake vLLM: this rehearses everything except vLLM)"
+  python -m tests.fake_vllm --port "$VLLM_PORT" > logs/vllm.log 2>&1 &
+else
+  bash scripts/serve_vllm.sh > logs/vllm.log 2>&1 &
+fi
 VLLM_PID=$!
 wait_for "http://127.0.0.1:${VLLM_PORT}/v1/models" 60 5 "vllm"
 
