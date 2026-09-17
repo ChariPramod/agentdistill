@@ -152,8 +152,17 @@ def test_the_smoke_script_fails_when_everything_fell_back():
 
 def test_the_smoke_script_drives_both_dialects():
     text = SMOKE.read_text()
-    assert "openai/cascade::auto" in text
-    assert "anthropic/cascade::auto" in text
+    assert 'openai/${SMOKE_MODEL}' in text
+    assert 'anthropic/${SMOKE_MODEL}' in text
+
+
+def test_the_real_run_drives_the_cascade_and_tiny_mode_drives_the_student():
+    """The cascade is the thing worth smoke-testing. Tiny mode has no teacher to escalate to, so it drives the
+    student -- still exercising the gateway, both dialects and the request log, and honest about the gap."""
+    text = SMOKE.read_text()
+    assert 'SMOKE_MODEL="${SMOKE_MODEL:-cascade::auto}"' in text
+    assert 'SMOKE_MODEL="${SMOKE_MODEL:-student}"' in text
+    assert "no teacher to escalate to" in text
 
 
 def test_record_accepts_the_flags_the_smoke_script_passes():

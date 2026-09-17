@@ -11,6 +11,16 @@ CFG="${AGENTDISTILL_CONFIG:-project.yaml}"
 AD="${AGENTDISTILL:-agentdistill}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 GW_PORT="${GW_PORT:-8710}"
+
+# What the example agent asks the gateway for. `cascade::auto` is the real thing: the gate decides per turn and
+# escalates to the teacher. Tiny mode has no teacher to escalate to, so it drives the student alone -- which
+# still exercises the gateway, both dialects, the request log and the fake vLLM, and is honest about not
+# exercising escalation.
+if [[ "${AGENTDISTILL_TINY:-0}" == "1" ]]; then
+  SMOKE_MODEL="${SMOKE_MODEL:-student}"
+else
+  SMOKE_MODEL="${SMOKE_MODEL:-cascade::auto}"
+fi
 OUT="${OUT_DIR:-$(mktemp -d)}"
 mkdir -p logs
 
@@ -63,14 +73,14 @@ curl -s "http://127.0.0.1:${GW_PORT}/healthz" | python -m json.tool
 
 BEFORE="$("$AD" requests count --config "$CFG")"
 
-echo "==> driving the example agent (openai dialect)"
+echo "==> driving the example agent (openai dialect) as ${SMOKE_MODEL}"
 python -m examples.support_agent.record \
-  --model "openai/cascade::auto" --base-url "http://127.0.0.1:${GW_PORT}/v1" \
+  --model "openai/${SMOKE_MODEL}" --base-url "http://127.0.0.1:${GW_PORT}/v1" \
   --n 5 --out "$OUT/smoke_openai.jsonl"
 
-echo "==> driving the example agent (anthropic dialect)"
+echo "==> driving the example agent (anthropic dialect) as ${SMOKE_MODEL}"
 python -m examples.support_agent.record \
-  --model "anthropic/cascade::auto" --base-url "http://127.0.0.1:${GW_PORT}" \
+  --model "anthropic/${SMOKE_MODEL}" --base-url "http://127.0.0.1:${GW_PORT}" \
   --n 5 --out "$OUT/smoke_anthropic.jsonl"
 
 AFTER="$("$AD" requests count --config "$CFG")"
