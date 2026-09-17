@@ -204,7 +204,7 @@ def test_base_check_on_a_missing_model(project):
 @pytest.mark.parametrize(
     ("args", "fragment"),
     [
-        (("retrain",), "milestone 7"),
+        (("ingest", "otel", "trace.json"), "milestone 1 stretch"),
     ],
 )
 def test_unbuilt_commands_say_so_clearly(project, args, fragment):
@@ -213,6 +213,17 @@ def test_unbuilt_commands_say_so_clearly(project, args, fragment):
     assert result.exit_code == 2
     assert "not built yet" in out(result)
     assert fragment in out(result)
+
+
+def test_retrain_is_implemented(project):
+    """`retrain` is built; a dry run against an empty registry prints the plan and changes nothing."""
+    _init(project)
+    result = run("retrain", "--dry-run")
+    combined = out(result)
+    assert "not built yet" not in combined
+    assert result.exit_code == 0
+    assert "would run ingest_gateway" in combined
+    assert "would run promote_canary" in combined
 
 
 def test_report_is_implemented(project):

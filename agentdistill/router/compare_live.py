@@ -80,6 +80,21 @@ def compare_live(
     }
 
 
+def _iso_since(spec: str) -> str:
+    """Parse `7d`, `48h`, or an ISO timestamp into an ISO timestamp."""
+    from datetime import UTC, datetime, timedelta
+
+    spec = spec.strip()
+    if spec.endswith(("d", "h")):
+        try:
+            n = int(spec[:-1])
+        except ValueError:
+            return spec
+        delta = timedelta(days=n) if spec.endswith("d") else timedelta(hours=n)
+        return (datetime.now(UTC) - delta).isoformat()
+    return spec
+
+
 def live_rows(registry: Any, since: str | None = None, limit: int = 100_000) -> list[dict]:
     """Gateway requests with an outcome, newest first."""
     from sqlalchemy import text

@@ -1,0 +1,75 @@
+# Weekly retrain. NOT ACTIVE.
+#
+# This file ends in `.draft` on purpose. It is renamed to `retrain.yml` only after `scripts/serve_smoke.sh` has
+# passed on the real self-hosted runner. Until then nothing here has been executed anywhere, and scheduling an
+# unverified pipeline to train and promote models unattended, every week, is the wrong order to do things in.
+#
+# Before renaming:
+#   1. `scripts/serve_smoke.sh` passes on the runner.
+#   2. `agentdistill retrain --dry-run` prints the eight stages with real counts.
+#   3. `agentdistill retrain --since 7d` has been run by hand once, start to finish.
+#   4. The runner has the registry's database and the artifacts directory on persistent storage. A retrain on an
+#      ephemeral runner loses the adapter it just trained.
+#
+# What this can and cannot do: it promotes to CANARY. Prod requires `adapter promote --to prod`, which requires
+# a live comparison that only accumulates over days of real traffic, and that stays a human decision.
+
+name: retrain
+
+on:
+  schedule:
+    # Sunday 02:00 UTC: after the week's traffic has been graded, before Monday.
+    - cron: "0 2 * * 0"
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "How far back to pull graded requests"
+        default: "7d"
+      dry_run:
+        description: "Print the plan and change nothing"
+        type: boolean
+        default: false
+
+concurrency:
+  # Two retrains at once would train from each other's half-written datasets.
+  group: retrain
+  cancel-in-progress: false
+
+jobs:
+  retrain:
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 600
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install
+        run: |
+          uv venv --python 3.13
+          uv pip install -e ".[train,serve]"
+
+      - name: Plan
+        run: .venv/bin/agentdistill retrain --dry-run --since "${{ inputs.since || '7d' }}"
+
+      - name: Retrain
+        if: ${{ !inputs.dry_run }}
+        run: |
+          .venv/bin/agentdistill retrain \
+            --since "${{ inputs.since || '7d' }}" \
+            --retrain-id "${{ github.run_id }}"
+
+      - name: Report
+        if: always()
+        run: .venv/bin/agentdistill report --format html --out artifacts/retrain-report.html
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrain-report
+          path: artifacts/retrain-report.html
+
+      # A stopped run is not a failed run: most weeks there is not enough new traffic, the first gate says so,
+      # and `retrain` exits 0. Only a stage that actually failed exits nonzero and fails the job.
+      - name: Summary
+        if: always()
+        run: .venv/bin/agentdistill adapter list

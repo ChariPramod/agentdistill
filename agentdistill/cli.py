@@ -629,6 +629,14 @@ def train_sft_cmd(
     name: str | None = typer.Option(None, help="Adapter name; defaults to the project name."),
     out: str | None = typer.Option(None, help="Where to write the adapter; defaults under artifacts/adapters."),
     max_steps: int | None = typer.Option(None, help="Cap training steps. Useful for a smoke run."),
+    epochs: float | None = typer.Option(None, help="Override train.epochs."),
+    from_adapter: str | None = typer.Option(
+        None, "--from-adapter",
+        help="Continue training this adapter instead of initializing a new one. What a retrain does.",
+    ),
+    lr_scale: float = typer.Option(
+        1.0, help="Multiply the configured learning rate. Continuation wants roughly a third."
+    ),
 ) -> None:
     """LoRA / QLoRA supervised fine-tuning on a built dataset.
 
@@ -665,6 +673,27 @@ def train_sft_cmd(
     train_cfg = cfg.train.model_dump()
     if max_steps is not None:
         train_cfg["max_steps"] = max_steps
+    if epochs is not None:
+        train_cfg["epochs"] = epochs
+    if lr_scale != 1.0:
+        train_cfg["lr"] = train_cfg["lr"] * lr_scale
+
+    resume_path, parent_id = None, None
+    if from_adapter:
+        from agentdistill.registry.lifecycle import adapter as get_adapter
+
+        try:
+            parent = get_adapter(reg, from_adapter)
+        except LookupError as e:
+            err.print(f"[red]{e}[/red]")
+            raise typer.Exit(code=1) from e
+        resume_path, parent_id = parent["path"], parent["id"]
+        if lr_scale == 1.0:
+            console.print(
+                "[yellow]continuing from an adapter at the full configured learning rate.[/yellow] The weights "
+                "start near a good solution; a fresh-run rate walks out of it. --lr-scale 0.333 is the retrain "
+                "loop's default."
+            )
 
     adapter_name = name or cfg.name
     version = reg.next_adapter_version(adapter_name)
@@ -675,6 +704,7 @@ def train_sft_cmd(
         reg.insert_training_run({
             "id": run_id, "dataset_id": dataset_id, "base_model": train_cfg["base_model"], "method": "sft",
             "config": train_cfg, "status": "running", "started_at": utcnow(),
+            "parent_adapter_id": parent_id,
         })
 
     console.print(f"[bold]training[/bold] {adapter_name} v{version} from {dataset_path}")
@@ -682,7 +712,7 @@ def train_sft_cmd(
     console.print(f"  quantization {train_cfg.get('quantization') or 'none'}, LoRA r={train_cfg['lora']['r']}")
 
     try:
-        result = train_sft(train_cfg, dataset_path, out_dir)
+        result = train_sft(train_cfg, dataset_path, out_dir, resume_adapter=resume_path)
     except (TrainingUnavailable, NoSuchBaseModel) as e:
         if dataset_id is not None:
             reg.finish_training_run(run_id, "failed", {"error": str(e)}, None)
@@ -698,6 +728,7 @@ def train_sft_cmd(
         reg.insert_adapter({
             "id": f"ad_{uuid.uuid4().hex[:16]}", "training_run_id": run_id, "name": adapter_name,
             "version": version, "base_model": train_cfg["base_model"], "path": str(out_dir),
+            "parent_adapter_id": parent_id,
         })
 
     loss = f"{result.eval_loss:.4f}" if result.eval_loss is not None else "n/a"
@@ -842,12 +873,66 @@ def _onpolicy_stages(cfg, reg, tag, round_cfg):
         return f"ds_pairs_{uuid.uuid4().hex[:8]}", len(balanced), kinds
 
     def _train_sft_continue(adapter, dataset_id):
-        _not_built("continuing SFT from an existing adapter inside a round", "needs a GPU; see scripts/gpu_day.sh")
-        raise AssertionError("unreachable")
+        """One RFT epoch continuing from the round's starting adapter.
+
+        Continuation rather than a fresh run, at a third of the configured rate: the rollouts are a small
+        correction on top of what the adapter already does, and a fresh-run learning rate would walk out of the
+        solution it starts in.
+        """
+        import uuid
+
+        from agentdistill.registry import utcnow
+        from agentdistill.train.sft import train_sft
+
+        row = next((a for a in reg.list_adapters() if a["id"] == adapter or a["name"] == adapter), None)
+        if row is None:
+            err.print(f"[red]no adapter {adapter!r} to continue from[/red]")
+            raise typer.Exit(code=1)
+
+        dataset = reg.get_dataset(dataset_id) or {"path": dataset_id, "id": None}
+        train_cfg = cfg.train.model_dump()
+        train_cfg["epochs"] = 1
+        train_cfg["lr"] = train_cfg["lr"] / 3
+
+        version = reg.next_adapter_version(row["name"])
+        out_dir = cfg.artifacts_dir / "adapters" / f"{row['name']}-v{version}"
+        run_id = f"tr_{uuid.uuid4().hex[:16]}"
+        if dataset.get("id"):
+            reg.insert_training_run({
+                "id": run_id, "dataset_id": dataset["id"], "base_model": row["base_model"], "method": "rft",
+                "config": train_cfg, "status": "running", "started_at": utcnow(),
+                "parent_adapter_id": row["id"],
+            })
+
+        result = train_sft(train_cfg, dataset["path"], out_dir, resume_adapter=row["path"])
+
+        new_id = f"ad_{uuid.uuid4().hex[:16]}"
+        if dataset.get("id"):
+            reg.finish_training_run(run_id, "succeeded", result.to_dict(), str(out_dir))
+        reg.insert_adapter({
+            "id": new_id, "training_run_id": run_id, "name": row["name"], "version": version,
+            "base_model": row["base_model"], "path": str(out_dir), "parent_adapter_id": row["id"],
+        })
+        return new_id
 
     def _merge(adapter):
-        _not_built("adapter merge", "milestone 2 on a GPU; see scripts/gpu_day.sh")
-        raise AssertionError("unreachable")
+        """Merge for the DPO stage, verified against the adapter it came from.
+
+        DPO needs a single set of weights to work from. An unverified merge here would make every downstream
+        number a measurement of the merge rather than of the round.
+        """
+        from agentdistill.train.merge import merge_and_verify
+
+        row = next((a for a in reg.list_adapters() if a["id"] == adapter or a["name"] == adapter), None)
+        if row is None:
+            err.print(f"[red]no adapter {adapter!r} to merge[/red]")
+            raise typer.Exit(code=1)
+        out_dir = cfg.artifacts_dir / "merged" / f"{row['name']}-v{row['version']}"
+        info = merge_and_verify(
+            row["base_model"], row["path"], str(out_dir),
+            _verification_traces(reg, cfg, 200), _turn_client_factory(cfg),
+        )
+        return info["out_dir"]
 
     def _train_dpo(merged, dataset_id):
         _not_built("DPO inside a round", "needs a GPU; the trainer itself is tested on CPU")
@@ -1746,9 +1831,68 @@ def report(
 
 
 @app.command()
-def retrain(config: str = "project.yaml") -> None:
-    """Run the full weekly loop: ingest, curate, train, eval, calibrate, canary."""
-    _not_built("the retrain loop", "milestone 7")
+def retrain(
+    config: str = typer.Option("project.yaml"),
+    since: str = typer.Option("7d", help="How far back to pull graded requests: 7d, 48h, or ISO."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the plan with counts and change nothing."),
+    from_stage: str | None = typer.Option(
+        None, "--from", help="Resume at this stage, ignoring markers from here on."
+    ),
+    retrain_id: str | None = typer.Option(None, help="Resume a specific retrain. Defaults to today's date."),
+) -> None:
+    """Run the weekly loop: ingest, curate, train, on-policy, eval, calibrate, quantize, canary.
+
+    Every stage has a gate, and the run stops at the first one that cannot be satisfied. Stopping is a normal
+    outcome: most weeks there is not enough new graded traffic to justify a retrain, and the first stage says so
+    and stops. A loop that promoted whatever it produced would be a mechanism for putting an unmeasured model
+    into production every week.
+
+    Nothing here reaches prod. The last stage promotes to canary; prod requires a live comparison that only
+    accumulates over days of real traffic.
+    """
+    from datetime import UTC, datetime
+
+    from agentdistill.retrain import Markers, run_pipeline
+    from agentdistill.retrain_stages import RetrainStageFailed, build_stages
+
+    cfg = _load(config)
+    reg = _registry(cfg)
+    rid = retrain_id or datetime.now(UTC).strftime("%Y%m%d")
+    markers = Markers(root=cfg.artifacts_dir, retrain_id=rid)
+
+    console.print(f"[bold]retrain {rid}[/bold]  (since {since})")
+    if dry_run:
+        console.print("[dim]--dry-run: nothing will be written.[/dim]")
+
+    stages = build_stages(cfg, reg, since=since)
+    try:
+        result = run_pipeline(
+            stages, {"retrain_id": rid}, markers=markers,
+            log=lambda line: console.print(f"  {line}"),
+            start_from=from_stage, dry_run=dry_run,
+        )
+    except ValueError as e:
+        err.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+    except RetrainStageFailed as e:
+        err.print(f"[red]a stage failed[/red]\n{e}")
+        raise typer.Exit(code=1) from e
+
+    console.print()
+    if result.ok:
+        console.print(f"[green]{result.summary()}[/green]")
+        if result.ctx.get("promoted"):
+            console.print(
+                f"  {result.ctx['promoted']} is now canary. It reaches prod through `adapter promote --to prod`, "
+                f"which needs a live comparison: `adapter compare-live <prod> <canary>`."
+            )
+        return
+
+    console.print(f"[yellow]{result.summary()}[/yellow]")
+    console.print(f"  Resume with `agentdistill retrain --retrain-id {rid} --from {result.stopped_at}`.")
+    # A gate refusing is not an error. Exit 0 so a weekly cron does not page anyone because there was no new
+    # traffic; a stage that actually failed raises above and exits 1.
+    return
 
 
 @adapter_app.command("compare-live")

@@ -130,11 +130,18 @@ def train_sft(
     dataset_path: str | Path,
     out_dir: str | Path,
     next_action_traces: list[dict] | None = None,
+    resume_adapter: str | Path | None = None,
 ) -> TrainResult:
     """LoRA / QLoRA supervised fine-tuning on a pre-tokenized, pre-masked dataset.
 
     `next_action_traces` enables the teacher-forced next-action callback during eval. Loss is a proxy; next-action
     accuracy is the first signal that reflects what the agent actually has to do.
+
+    `resume_adapter` continues training an existing adapter instead of initializing a new one. This is what a
+    retrain does: the new corpus is mostly the old corpus plus a few weeks of traffic, and restarting from the
+    base model would throw away everything the serving adapter knows in order to relearn it. Continuation wants
+    a much lower learning rate than a fresh run -- the retrain loop uses a third -- because the weights start
+    near a good solution and a fresh-run rate walks straight out of it.
     """
     _require_training_deps()
 
@@ -150,6 +157,7 @@ def train_sft(
     tok = AutoTokenizer.from_pretrained(base_model)
     attn = attn_implementation(cfg)
 
+    model: Any
     try:
         model = AutoModelForCausalLM.from_pretrained(
             base_model,
@@ -165,6 +173,17 @@ def train_sft(
             "the dataset was tokenized with the tokenizer named in its manifest -- a different tokenizer means a "
             "new dataset version."
         ) from e
+
+    peft_config: Any = build_lora_config(cfg)
+    if resume_adapter:
+        from peft import PeftModel
+
+        # `is_trainable=True` is load-bearing: without it PEFT loads the adapter for inference with requires_grad
+        # off, training runs, the loss moves nowhere, and the saved adapter is byte-identical to the one it
+        # started from. That failure is silent and looks exactly like a corpus with nothing new in it.
+        model = PeftModel.from_pretrained(model, str(resume_adapter), is_trainable=True)
+        # The adapter is already attached; handing SFTTrainer a peft_config as well would wrap it a second time.
+        peft_config = None
 
     train_ds, eval_ds, n_target_tokens = load_dataset_splits(dataset_path, seed=cfg.get("seed", 17))
     total_steps = estimate_total_steps(len(train_ds), cfg)
@@ -190,7 +209,7 @@ def train_sft(
         train_dataset=train_ds,
         eval_dataset=eval_ds,
         processing_class=tok,
-        peft_config=build_lora_config(cfg),
+        peft_config=peft_config,
         callbacks=callbacks or None,
     )
     trainer.train()
@@ -211,6 +230,7 @@ def train_sft(
         "flash_attn": flash_attn_available(),
         "quantization": cfg.get("quantization"),
         "total_steps_estimated": total_steps,
+        "resumed_from": str(resume_adapter) if resume_adapter else None,
     }
     if n_target_tokens and runtime:
         epochs = float(cfg.get("epochs", 2))
