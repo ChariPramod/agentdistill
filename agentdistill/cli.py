@@ -939,6 +939,8 @@ def _onpolicy_stages(cfg, reg, tag, round_cfg, backend: str = "hf"):
         if row is None:
             err.print(f"[red]no adapter {adapter!r} to continue from[/red]")
             raise typer.Exit(code=1)
+        # Later stages only receive paths, so the round's starting adapter is carried here.
+        state["start_adapter"] = row
 
         dataset = reg.get_dataset(dataset_id) or {"path": dataset_id, "id": None}
         train_cfg = cfg.train_config(epochs=1)
@@ -987,8 +989,52 @@ def _onpolicy_stages(cfg, reg, tag, round_cfg, backend: str = "hf"):
         return info["out_dir"]
 
     def _train_dpo(merged, dataset_id):
-        _not_built("DPO inside a round", "needs a GPU; the trainer itself is tested on CPU")
-        raise AssertionError("unreachable")
+        """DPO on the round's preference pairs, from the merged weights.
+
+        From the merged model rather than the base plus adapter: DPO trains a fresh LoRA, and stacking one on
+        top of another is not something the reference-model maths accounts for. The merge earlier in the round
+        exists for exactly this.
+        """
+        from agentdistill.registry import utcnow
+        from agentdistill.train.dpo import train_dpo
+
+        pairs = state.get("pairs") or []
+        dataset = reg.get_dataset(dataset_id) or {"id": None}
+        start = state.get("start_adapter") or {}
+        name = start.get("name") or cfg.name
+
+        version = reg.next_adapter_version(name)
+        out_dir = cfg.artifacts_dir / "adapters" / f"{name}-dpo-v{version}"
+        run_id = f"tr_{uuid.uuid4().hex[:16]}"
+        train_cfg = cfg.train_config(base_model=merged)
+
+        if dataset.get("id"):
+            reg.insert_training_run({
+                "id": run_id, "dataset_id": dataset["id"], "base_model": merged, "method": "dpo",
+                "config": train_cfg, "status": "running", "started_at": utcnow(),
+                "parent_adapter_id": start.get("id"),
+            })
+
+        result = train_dpo(
+            train_cfg, pairs, merged, out_dir, max_teacher_ratio=round_cfg.max_teacher_ratio
+        )
+        if result.looks_flat:
+            # Not fatal: the round's own comparison decides. But a flat reward accuracy means the pairs carried
+            # no signal, and that is the first thing to look at if the round is then discarded.
+            console.print(
+                "[yellow]DPO reward accuracy is flat[/yellow] — the pairs did not separate. If this round is "
+                "discarded, look at the pair set before looking at the trainer."
+            )
+
+        new_id = f"ad_{uuid.uuid4().hex[:16]}"
+        if dataset.get("id"):
+            reg.finish_training_run(run_id, "succeeded", result.metrics, str(out_dir))
+        reg.insert_adapter({
+            "id": new_id, "training_run_id": run_id, "name": f"{name}-dpo", "version": version,
+            "base_model": merged, "path": str(out_dir), "parent_adapter_id": start.get("id"),
+            "tag": tag,
+        })
+        return run_id, new_id
 
     def _run_eval(adapter):
         es = reg.get_eval_set(cfg.eval.eval_set)

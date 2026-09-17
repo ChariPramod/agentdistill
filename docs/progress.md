@@ -10,14 +10,13 @@ What is built, what is measured, and every place the code deliberately differs f
 | M2 — SFT | **code complete, unmeasured.** No GPU run; no throughput or next-action number exists. |
 | M2.5 — example agent | **built and tested.** Corpus recorded from a scripted teacher, not a teacher. |
 | M3 — eval harness | **done.** Control test passes; `eval run` / `compare` / `show` work end to end. Judge grading is calibrated. |
-| M4 — on-policy | round loop, DPO data, and `decide` built and tested. The GPU-bound round stages are not. |
+| M4 — on-policy | **done.** The full round runs end to end on CPU: rollouts, RFT dataset, SFT continuation, verified merge, DPO, eval, decide. |
 | M5 — cascade | **code complete, unmeasured.** Gate, calibration, threshold search, and verification all run; no real logprobs have been fitted on. |
 | M6 — gateway, router, serving | **done.** Both dialects verified against the real SDKs; router, canary split, and live comparison tested. |
 | M7 — retrain loop | **done.** Eight stages with gates; the workflow is committed as a draft until `serve_smoke.sh` passes on real hardware. |
 | M8 — cost model and report | **done.** HTML and markdown, idempotent injection, no number without a run id. |
 
-Remaining `_not_built` commands: `ingest otel`, and the DPO stage inside an on-policy round. Everything else
-runs.
+The only remaining `_not_built` command is `ingest otel`. Everything else runs.
 
 **The sentence this phase exists to produce is still not true.** It requires a student, and a student requires a
 GPU run this environment cannot do. What exists is every piece around it: the harness reproduces recordings

@@ -549,3 +549,78 @@ def test_train_sft_continue_returns_a_run_and_an_adapter(project_config, registr
     # Continuation, not a fresh run, at a third of the configured rate.
     assert seen["resume_adapter"] == str(tmp_path / "start")
     assert seen["lr"] == pytest.approx(project_config.train.lr / 3)
+
+
+def test_train_dpo_returns_a_run_and_an_adapter_from_the_merged_weights(
+    project_config, registry, tmp_path, monkeypatch
+):
+    """DPO trains a fresh LoRA, so it starts from merged weights rather than stacking on the SFT adapter --
+    the reference-model maths does not account for one adapter on top of another."""
+    from agentdistill.cli import _onpolicy_stages
+    from agentdistill.config import TrainConfig
+    from agentdistill.registry.base import utcnow
+    from agentdistill.train.dpo import DpoResult
+    from agentdistill.train.onpolicy import RoundCfg
+
+    registry.insert_dataset({"id": "ds_pairs", "name": "p", "version": 1, "kind": "dpo", "filter_config": {},
+                             "n_samples": 4, "n_tokens": 0, "content_hash": "h", "path": str(tmp_path)})
+    registry.insert_dataset({"id": "ds_seed", "name": "s", "version": 1, "kind": "sft", "filter_config": {},
+                             "n_samples": 4, "n_tokens": 40, "content_hash": "h2", "path": str(tmp_path)})
+    registry.insert_training_run({"id": "tr_seed", "dataset_id": "ds_seed", "base_model": "m", "method": "sft",
+                                  "config": {}, "status": "succeeded", "started_at": utcnow()})
+    registry.insert_adapter({"id": "ad_start", "training_run_id": "tr_seed", "name": "student", "version": 1,
+                             "base_model": "m", "path": str(tmp_path / "start")})
+
+    seen = {}
+
+    def fake_train_dpo(cfg, pairs, base_or_merged, out_dir, max_teacher_ratio=1.0):
+        seen["base"] = base_or_merged
+        seen["cfg_base"] = cfg["base_model"]
+        seen["n_pairs"] = len(pairs)
+        return DpoResult(adapter_path=str(out_dir), steps=1, n_pairs=len(pairs),
+                         final_reward_accuracy=0.8, metrics={"steps": 1})
+
+    monkeypatch.setattr("agentdistill.train.dpo.train_dpo", fake_train_dpo)
+    project_config.train = TrainConfig(base_model="m", max_seq_len=project_config.dataset.max_seq_len)
+
+    stages = _onpolicy_stages(project_config, registry, "round-1", RoundCfg(), "hf")
+    merged_dir = str(tmp_path / "merged")
+    run_id, adapter_id = stages.train_dpo(merged_dir, "ds_pairs")
+
+    assert seen["base"] == merged_dir
+    assert seen["cfg_base"] == merged_dir, "DPO must train from the merged weights, not the configured base"
+    assert registry.get_training_run(run_id)["method"] == "dpo"
+    row = next(a for a in registry.list_adapters() if a["id"] == adapter_id)
+    assert row["tag"] == "round-1"
+    assert row["base_model"] == merged_dir
+
+
+def test_a_flat_dpo_reward_is_reported_but_does_not_stop_the_round(
+    project_config, registry, tmp_path, monkeypatch, capsys
+):
+    """The round's own comparison decides. A flat reward means the pairs carried no signal, which is the first
+    thing to look at if the round is then discarded -- so it is said out loud, not raised."""
+    from agentdistill.cli import _onpolicy_stages
+    from agentdistill.config import TrainConfig
+    from agentdistill.registry.base import utcnow
+    from agentdistill.train.dpo import DpoResult
+    from agentdistill.train.onpolicy import RoundCfg
+
+    registry.insert_dataset({"id": "ds_pairs", "name": "p", "version": 1, "kind": "dpo", "filter_config": {},
+                             "n_samples": 2, "n_tokens": 0, "content_hash": "h", "path": str(tmp_path)})
+    registry.insert_training_run({"id": "tr_seed", "dataset_id": "ds_pairs", "base_model": "m", "method": "sft",
+                                  "config": {}, "status": "succeeded", "started_at": utcnow()})
+
+    monkeypatch.setattr(
+        "agentdistill.train.dpo.train_dpo",
+        lambda cfg, pairs, base, out, max_teacher_ratio=1.0: DpoResult(
+            adapter_path=str(out), steps=1, n_pairs=2, final_reward_accuracy=0.5, metrics={},
+        ),
+    )
+    project_config.train = TrainConfig(base_model="m", max_seq_len=project_config.dataset.max_seq_len)
+
+    stages = _onpolicy_stages(project_config, registry, "r", RoundCfg(), "hf")
+    run_id, adapter_id = stages.train_dpo(str(tmp_path / "merged"), "ds_pairs")
+
+    assert run_id and adapter_id
+    assert "flat" in capsys.readouterr().out.lower()
