@@ -683,10 +683,7 @@ def train_sft_cmd(
         err.print(f"[red]{e}[/red]")
         raise typer.Exit(code=1) from e
 
-    train_cfg = cfg.train.model_dump()
-    # Resolved against the config's own directory, so `train sft` works from the repo root as well as from
-    # beside the config.
-    train_cfg["base_model"] = cfg.base_model
+    train_cfg = cfg.train_config()
     if max_steps is not None:
         train_cfg["max_steps"] = max_steps
     if epochs is not None:
@@ -944,8 +941,7 @@ def _onpolicy_stages(cfg, reg, tag, round_cfg, backend: str = "hf"):
             raise typer.Exit(code=1)
 
         dataset = reg.get_dataset(dataset_id) or {"path": dataset_id, "id": None}
-        train_cfg = cfg.train.model_dump()
-        train_cfg["epochs"] = 1
+        train_cfg = cfg.train_config(epochs=1)
         train_cfg["lr"] = train_cfg["lr"] / 3
 
         version = reg.next_adapter_version(row["name"])

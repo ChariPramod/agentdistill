@@ -167,8 +167,36 @@ def test_nothing_reads_the_raw_base_model_path():
                 continue
             if ".train.base_model" in line and "resolve_model" not in line and "getattr(cfg" not in line:
                 offenders.append(f"{path.relative_to(ROOT)}:{i}: {line.strip()}")
+            # The raw dump carries base_model exactly as written. `cfg.train_config()` resolves it.
+            if ".train.model_dump()" in line:
+                offenders.append(f"{path.relative_to(ROOT)}:{i}: {line.strip()} (use cfg.train_config())")
 
     assert not offenders, (
         "these read train.base_model without resolving it, so they work from beside the config and fail from "
         "anywhere else:\n  " + "\n  ".join(offenders)
     )
+
+
+def test_train_config_resolves_the_base_model(tmp_path):
+    import yaml
+
+    from agentdistill.config import ProjectConfig
+
+    (tmp_path / "model").mkdir()
+    (tmp_path / "project.yaml").write_text(yaml.safe_dump({
+        "name": "t",
+        "registry": f"sqlite:///{tmp_path}/r.db",
+        "artifacts": str(tmp_path / "a"),
+        "reports": str(tmp_path / "r"),
+        "dataset": {"max_seq_len": 512},
+        "train": {"base_model": "./model", "max_seq_len": 512, "epochs": 3},
+    }))
+    cfg = ProjectConfig.load(str(tmp_path / "project.yaml"))
+
+    built = cfg.train_config()
+    assert built["base_model"] == str(tmp_path / "model")
+    assert built["epochs"] == 3
+    # Overrides apply on top, which is what the round's one-epoch continuation needs.
+    assert cfg.train_config(epochs=1)["epochs"] == 1
+    # And the original is untouched, so one caller cannot affect another.
+    assert cfg.train.epochs == 3

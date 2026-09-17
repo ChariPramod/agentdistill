@@ -403,6 +403,21 @@ class ProjectConfig(StrictModel):
         """`train.base_model`, with a local path resolved against the config's directory."""
         return self.resolve_model(self.train.base_model) if self.train else None
 
+    def train_config(self, **overrides: Any) -> dict:
+        """The training section as a dict, with `base_model` resolved.
+
+        Every trainer entry point goes through here rather than calling `cfg.train.model_dump()` itself. The
+        raw dump carries `base_model` exactly as written, which may be a path relative to the config, and a
+        trainer started from anywhere else then fails to load it. That bug arrived four separate times before
+        this existed.
+        """
+        if self.train is None:
+            raise ValueError("this project has no `train` section")
+        cfg = self.train.model_dump()
+        cfg["base_model"] = self.base_model
+        cfg.update(overrides)
+        return cfg
+
     @property
     def artifacts_dir(self) -> Path:
         return self.resolve(self.artifacts)
