@@ -197,7 +197,10 @@ def curate(
 
     cfg = _load(config)
     reg = _registry(cfg)
-    traces = reg.list_traces()
+    # Rollouts share the traces table so that an RFT dataset can point at the trajectories it came from. They
+    # are the student's own output and must never re-enter the training corpus: a student curated from its own
+    # rollouts is training on itself, and the failure is slow, quiet, and hard to attribute afterwards.
+    traces = [t for t in reg.list_traces() if t.get("source") != "rollout"]
     if not traces:
         err.print("[red]no traces in the registry[/red] — run `agentdistill ingest …` first.")
         raise typer.Exit(code=1)
@@ -797,7 +800,12 @@ def train_onpolicy(
         max_fuzzy_share=op.max_fuzzy_share,
     )
 
-    train_traces = [t for t in reg.list_traces() if t["id"] not in reg.eval_set_trace_ids()]
+    # Teacher traces only: these become the `teacher_by_task` the round builds preference pairs against, and a
+    # rollout as its own preference target teaches nothing.
+    train_traces = [
+        t for t in reg.list_traces()
+        if t["id"] not in reg.eval_set_trace_ids() and t.get("source") != "rollout"
+    ]
     task_ids = [t["id"] for t in train_traces]
     if not task_ids:
         err.print("[red]no training traces[/red]; ingest and curate before running on-policy rounds.")
@@ -880,7 +888,7 @@ def _onpolicy_stages(cfg, reg, tag, round_cfg, backend: str = "hf"):
         treating it as a path -- so the round trained on nothing it had just built.
         """
         from agentdistill.data.dataset import build_dataset
-        from agentdistill.eval.rollouts import RolloutSet
+        from agentdistill.eval.rollouts import RolloutSet, register_rollouts
 
         rs = state.get("rollouts") or RolloutSet(rollouts=rollouts)
         picked = build_rft_fn(rs, cap_per_task=cap)
@@ -888,12 +896,16 @@ def _onpolicy_stages(cfg, reg, tag, round_cfg, backend: str = "hf"):
         if not picked:
             return None, 0
 
+        # Registered first: a dataset's samples carry a foreign key to the trace each came from, and a rollout
+        # is not a trace until something writes it down.
+        registered = register_rollouts(reg, picked, tag=tag)
+
         name = f"{cfg.name}-rft"
         result = build_dataset(
-            picked, cfg, name=name, version=reg.next_dataset_version(name), registry=reg, kind="rft",
+            registered, cfg, name=name, version=reg.next_dataset_version(name), registry=reg, kind="rft",
             filter_config={"source": "on-policy rollouts", "cap_per_task": cap, "tag": tag},
         )
-        return result.dataset_id, len(picked)
+        return result.dataset_id, len(registered)
 
     def _build_pairs(rollouts, teacher_by_task):
         """Preference pairs, written as a real dataset, for the same reasons as `_build_rft`."""

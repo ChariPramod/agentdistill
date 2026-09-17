@@ -13,6 +13,7 @@ these rollouts.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -150,3 +151,41 @@ def build_pairs(rollouts: RolloutSet, teacher_traces: list[dict], max_pairs_per_
     same_task, _ = pairs_from_traces(rollouts.rollouts, max_pairs_per_task=max_pairs_per_task)
     versus_teacher = pairs_against_teacher(rollouts.rollouts, teacher_traces)
     return same_task + versus_teacher
+
+
+def register_rollouts(registry: Any, rollouts: list[dict], tag: str | None = None) -> list[dict]:
+    """Store rollouts as traces so a dataset built from them has real provenance.
+
+    A dataset's samples carry a foreign key to the trace each came from, and a rollout is not a recorded trace
+    until something writes it down. Without this, building an RFT set from rollouts fails on that key -- and
+    the deeper problem is the one the key exists to prevent: an RFT dataset whose rows point at nothing cannot
+    be traced back to the trajectories that produced it, which is exactly the question to ask when a round makes
+    the student worse.
+
+    Returns the rollouts with their registry ids and content hashes filled in, ready for `build_dataset`.
+    """
+    import hashlib
+
+    from agentdistill.registry.base import utcnow
+
+    prepared: list[dict] = []
+    for r in rollouts:
+        messages = r["messages"]
+        content_hash = hashlib.sha256(
+            json.dumps(messages, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
+        prepared.append({
+            **r,
+            "id": r.get("id") or f"ro_{content_hash[:20]}",
+            # `rollout`, not `jsonl`: a trace the student generated must never be mistaken for one the teacher
+            # produced, in a report or in a later curation run.
+            "source": "rollout",
+            "source_ref": tag,
+            "content_hash": content_hash,
+            "n_turns": sum(1 for m in messages if m.get("role") == "assistant"),
+            "created_at": r.get("created_at") or utcnow(),
+            "metadata": {**(r.get("metadata") or {}), "rollout": True, "tag": tag},
+        })
+
+    registry.insert_traces(prepared)
+    return prepared

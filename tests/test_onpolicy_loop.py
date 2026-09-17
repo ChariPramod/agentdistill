@@ -380,3 +380,107 @@ def test_a_round_can_be_recorded_with_the_dataset_ids_it_built(project_config, r
         row = conn.execute(text("SELECT * FROM onpolicy_rounds WHERE id = 'rd1'")).mappings().first()
     assert row is not None
     assert row["dpo_dataset_id"] == pairs_id
+
+
+def test_rollouts_are_registered_with_a_source_that_marks_them_as_the_students_own():
+    """A rollout must never be mistaken for a teacher trace, in a report or in a later curation run."""
+    from agentdistill.eval.rollouts import register_rollouts
+
+    class FakeRegistry:
+        def __init__(self) -> None:
+            self.inserted: list[dict] = []
+
+        def insert_traces(self, traces):
+            self.inserted.extend(traces)
+            return {"added": len(traces), "skipped": 0}
+
+    reg = FakeRegistry()
+    rollouts = [
+        {"task_id": "t1", "success": True,
+         "messages": [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]},
+    ]
+    prepared = register_rollouts(reg, rollouts, tag="r1")
+
+    assert len(reg.inserted) == 1
+    assert reg.inserted[0]["source"] == "rollout"
+    assert reg.inserted[0]["metadata"]["rollout"] is True
+    assert reg.inserted[0]["metadata"]["tag"] == "r1"
+    # `build_dataset` needs both of these, and a rollout arrives with neither.
+    assert prepared[0]["id"].startswith("ro_")
+    assert len(prepared[0]["content_hash"]) == 64
+
+
+def test_identical_rollouts_hash_to_the_same_id():
+    from agentdistill.eval.rollouts import register_rollouts
+
+    class FakeRegistry:
+        def insert_traces(self, traces):
+            return {"added": len(traces), "skipped": 0}
+
+    messages = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
+    a = register_rollouts(FakeRegistry(), [{"task_id": "t", "messages": messages}])
+    b = register_rollouts(FakeRegistry(), [{"task_id": "t", "messages": messages}])
+    assert a[0]["id"] == b[0]["id"]
+
+
+def test_curation_never_sees_a_rollout(tmp_path, monkeypatch):
+    """The whole reason rollouts carry a distinct source.
+
+    A student curated from its own rollouts is training on itself. The failure is slow, quiet, and very hard to
+    attribute weeks later, so it is worth a test that fails loudly rather than a comment.
+    """
+    import json
+
+    import yaml
+    from typer.testing import CliRunner
+
+    from agentdistill.cli import app
+    from agentdistill.eval.rollouts import register_rollouts
+    from agentdistill.registry import open_registry
+    from tests.conftest import TOKENIZER_DIR, make_trace
+
+    monkeypatch.chdir(tmp_path)
+    traces = [
+        make_trace(f"t{i}", task=f"Order {i} is late and I would like to know where it is",
+                   closing=" ".join(f"Point {j} of case {i} is {i * 7 + j}" for j in range(5)))
+        for i in range(8)
+    ]
+    (tmp_path / "traces.jsonl").write_text("\n".join(json.dumps(t) for t in traces) + "\n")
+    (tmp_path / "project.yaml").write_text(yaml.safe_dump({
+        "name": "demo",
+        "registry": "sqlite:///.agentdistill/registry.db",
+        "artifacts": "./artifacts",
+        "reports": "./reports",
+        "dataset": {"max_seq_len": 512},
+        "curate": {"clusters": 2, "cap_per_cluster": 50},
+        "train": {"base_model": str(TOKENIZER_DIR), "max_seq_len": 512},
+    }))
+
+    runner = CliRunner()
+    assert runner.invoke(app, ["ingest", "jsonl", "traces.jsonl"]).exit_code == 0
+
+    reg = open_registry("sqlite:///.agentdistill/registry.db", root=tmp_path)
+    try:
+        # Twenty rollouts, which would swamp eight teacher traces if curation picked them up.
+        register_rollouts(reg, [
+            {"task_id": f"r{i}", "success": True,
+             "messages": [{"role": "user", "content": f"rollout {i} please help with this order now"},
+                          {"role": "assistant", "content": f"Rollout answer {i}, which is the student talking"}]}
+            for i in range(20)
+        ], tag="round-1")
+        assert len(reg.list_traces()) == 28
+    finally:
+        reg.close()
+
+    assert runner.invoke(app, ["curate"]).exit_code == 0
+
+    reg = open_registry("sqlite:///.agentdistill/registry.db", root=tmp_path)
+    try:
+        dataset = reg.get_dataset("demo")
+        assert dataset is not None
+        # Eight teacher traces went in. Nothing from the twenty rollouts may come out.
+        assert dataset["n_samples"] <= 8, (
+            f"curation produced {dataset['n_samples']} samples from 8 teacher traces; rollouts leaked in"
+        )
+    finally:
+        reg.close()
