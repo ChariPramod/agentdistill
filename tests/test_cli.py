@@ -205,7 +205,6 @@ def test_base_check_on_a_missing_model(project):
     ("args", "fragment"),
     [
         (("retrain",), "milestone 7"),
-        (("report",), "milestone 8"),
     ],
 )
 def test_unbuilt_commands_say_so_clearly(project, args, fragment):
@@ -214,6 +213,34 @@ def test_unbuilt_commands_say_so_clearly(project, args, fragment):
     assert result.exit_code == 2
     assert "not built yet" in out(result)
     assert fragment in out(result)
+
+
+def test_report_is_implemented(project):
+    """`report` is built; with an empty registry it must still render, with warnings."""
+    _init(project)
+    result = run("report", "--format", "md")
+    combined = out(result)
+    assert "not built yet" not in combined
+    assert result.exit_code == 0
+    assert "agentdistill:results:begin" in combined
+
+
+def test_report_injects_into_the_readme(project):
+    _init(project)
+    readme = project / "README.md"
+    readme.write_text("# My agent\n\nIntro.\n")
+    assert run("report", "--format", "md", "--inject", str(readme)).exit_code == 0
+    once = readme.read_text()
+    assert "## Results" in once
+    run("report", "--format", "md", "--inject", str(readme))
+    assert readme.read_text().count("agentdistill:results:begin") == 1, "injection must be idempotent"
+
+
+def test_report_rejects_an_unknown_format(project):
+    _init(project)
+    result = run("report", "--format", "pdf")
+    assert result.exit_code == 1
+    assert "html or md" in out(result)
 
 
 def test_adapter_promote_is_implemented(project):

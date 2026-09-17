@@ -1512,9 +1512,53 @@ def serve(
 
 
 @app.command()
-def report(config: str = "project.yaml", out: str = "reports/latest.html") -> None:
-    """Build the cost and quality report."""
-    _not_built("the cost report", "milestone 8")
+def report(
+    out: str | None = typer.Option(None, help="Where to write the report. Defaults by format."),
+    fmt: str = typer.Option("html", "--format", help="html or md."),
+    tag: str | None = typer.Option(None, help="Restrict to a tag, e.g. 'gpu-day*'."),
+    inject_into: str | None = typer.Option(None, "--inject", help="Inject the results block into this README."),
+    include_run_ids: bool = typer.Option(True, help="Kept for the runbook; run ids are always included."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Build the cost and quality report from the registry.
+
+    Every number carries the run id that produced it. `--format md --inject README.md` is the only way figures
+    reach the README: a number typed by hand outlives the run that produced it.
+    """
+    from agentdistill.report.assemble import assemble
+    from agentdistill.report.html import write as write_html
+    from agentdistill.report.markdown import full_markdown, inject, results_block
+
+    cfg = _load(config)
+    reg = _registry(cfg)
+    data = assemble(reg, cfg, tag_glob=tag)
+
+    if fmt not in ("html", "md"):
+        err.print("[red]--format must be html or md[/red]")
+        raise typer.Exit(code=1)
+
+    if inject_into:
+        path = Path(inject_into)
+        if not path.exists():
+            err.print(f"[red]no file at {path}[/red]")
+            raise typer.Exit(code=1)
+        path.write_text(inject(path.read_text(), results_block(data)))
+        console.print(f"[green]injected results into[/green] {path}")
+
+    if fmt == "md":
+        target = Path(out) if out else cfg.reports_dir / "report.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(full_markdown(data))
+    else:
+        target = Path(out) if out else cfg.reports_dir / "report.html"
+        write_html(data, target)
+
+    console.print(results_block(data))
+    console.print(f"\n[green]wrote[/green] {target}")
+    if data.warnings:
+        console.print(
+            f"[yellow]{len(data.warnings)} warning(s)[/yellow]; the report says which claims could not be made."
+        )
 
 
 @app.command()
