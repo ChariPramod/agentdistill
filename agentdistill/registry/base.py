@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -163,7 +164,7 @@ class Registry:
         table -- SQLite cannot alter a CHECK constraint in place -- and rebuilding a table on every process
         start is both wasteful and a window in which an interrupted run loses rows.
         """
-        with self.engine.begin() as conn:
+        with self._migration_connection() as conn:
             self._ensure_migration_ledger(conn)
             applied = self._applied_migrations(conn)
 
@@ -191,6 +192,41 @@ class Registry:
                     text("INSERT INTO schema_version (version, applied_at) VALUES (:v, :t)"),
                     {"v": SCHEMA_VERSION, "t": utcnow()},
                 )
+
+    @contextmanager
+    def _migration_connection(self) -> Any:
+        """A transactional connection with SQLite's foreign keys disabled for the duration.
+
+        Rebuilding a table -- which is the only way to change a CHECK constraint in SQLite -- means dropping
+        one that other tables reference, and `PRAGMA foreign_keys` is a no-op inside a transaction. So the
+        pragma is set on an autocommitting connection first, and the migrations then run inside an explicit
+        transaction on that same connection. This is the procedure SQLite's own documentation prescribes, with
+        the `foreign_key_check` at the end that makes it safe: if a rebuild orphaned a row, the whole migration
+        rolls back rather than leaving a database that passes startup and fails later.
+        """
+        connection = self.engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+        try:
+            if self.dialect == "sqlite":
+                connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            connection.exec_driver_sql("BEGIN")
+            try:
+                yield connection
+                if self.dialect == "sqlite":
+                    orphans = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+                    if orphans:
+                        raise RuntimeError(
+                            f"a migration left {len(orphans)} orphaned row(s): {orphans[:5]}. "
+                            f"Nothing was committed."
+                        )
+                connection.exec_driver_sql("COMMIT")
+            except BaseException:
+                connection.exec_driver_sql("ROLLBACK")
+                raise
+            finally:
+                if self.dialect == "sqlite":
+                    connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        finally:
+            connection.close()
 
     @staticmethod
     def _ensure_migration_ledger(conn: Any) -> None:

@@ -192,12 +192,17 @@ def test_a_database_predating_the_ledger_migrates_without_losing_rows(tmp_path):
     from sqlalchemy import text
 
     from agentdistill.registry import open_registry
+    from agentdistill.registry.base import utcnow
 
     url = f"sqlite:///{tmp_path}/legacy.db"
     reg = open_registry(url)
     try:
         reg.insert_dataset({"id": "ds_keep", "name": "keep", "version": 1, "kind": "sft", "filter_config": {},
                             "n_samples": 7, "n_tokens": 70, "content_hash": "h", "path": "/tmp/keep"})
+        # A row in another table pointing at it. Rebuilding `datasets` with this present is the case that
+        # actually fails: SQLite ignores `PRAGMA foreign_keys` inside a transaction, so the DROP is refused.
+        reg.insert_training_run({"id": "tr1", "dataset_id": "ds_keep", "base_model": "m", "method": "sft",
+                                 "config": {}, "status": "succeeded", "started_at": utcnow()})
         with reg.engine.begin() as conn:
             conn.execute(text("DROP TABLE schema_migrations"))
     finally:
@@ -207,6 +212,7 @@ def test_a_database_predating_the_ledger_migrates_without_losing_rows(tmp_path):
     try:
         kept = reg.get_dataset("ds_keep")
         assert kept is not None and kept["n_samples"] == 7
+        assert reg.get_training_run("tr1")["dataset_id"] == "ds_keep"
     finally:
         reg.close()
 
