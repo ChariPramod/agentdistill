@@ -183,7 +183,23 @@ def test_a_reordered_calibration_is_refused():
 
 
 def test_matching_feature_order_passes():
-    assert assert_feature_order({"feature_order": FEATURES}, FEATURES) is None
+    assert assert_feature_order({"feature_order": FEATURES}, FEATURES) == FEATURES
+
+
+def test_a_narrower_stored_order_is_allowed_and_wins():
+    """Calibration drops features that had no values; the model expects exactly what it was fitted on."""
+    narrowed = [f for f in FEATURES if f != "agreement"]
+    assert assert_feature_order({"feature_order": narrowed}, FEATURES) == narrowed
+
+
+def test_a_feature_the_runtime_cannot_produce_is_refused():
+    with pytest.raises(ValueError, match="not configured to produce"):
+        assert_feature_order({"feature_order": [*FEATURES, "invented_feature"]}, FEATURES)
+
+
+def test_an_empty_stored_order_is_refused():
+    with pytest.raises(ValueError, match="records no feature order"):
+        assert_feature_order({"feature_order": []}, FEATURES)
 
 
 # --------------------------------------------------------------------------------------------------------------
@@ -237,3 +253,71 @@ def test_a_plain_client_reports_no_escalations():
 
 def test_turn_record_serializes():
     assert TurnRecord("student", 0.9, False, 4, 0).to_dict()["arm"] == "student"
+
+
+# --------------------------------------------------------------------------------------------------------------
+# the NaN invariant
+#
+# Absent argument features must stay absent. Zero is a plausible logprob, so imputing it would teach the gate
+# that a turn with no tool call is a confident one.
+# --------------------------------------------------------------------------------------------------------------
+
+
+def test_a_text_only_turn_has_nan_in_every_argument_slot():
+    from agentdistill.cascade.features import as_vector, turn_features
+
+    text_choice = choice("just an answer", tool=None)
+    features = turn_features(text_choice, [], [], cluster_prior=0.5, turn_idx=0, prefix_tokens=100)
+    assert np.isnan(features.arg_mean_logprob)
+    assert np.isnan(features.arg_min_logprob)
+    assert features.has_tool_call == 0
+
+    vector = as_vector(features, FEATURES)
+    for name in ("arg_mean_logprob", "arg_min_logprob"):
+        assert np.isnan(vector[FEATURES.index(name)]), f"{name} must stay NaN, not become 0"
+    # Everything that is genuinely present is still finite.
+    assert np.isfinite(vector[FEATURES.index("mean_logprob")])
+
+
+def test_a_real_calibrator_scores_a_nan_vector_without_error():
+    """HistGradientBoosting handles NaN natively; this pins that the pipeline does too."""
+    from agentdistill.cascade.calibrate import fit_calibrator
+    from agentdistill.cascade.features import as_vector, matrix, turn_features
+
+    rng = np.random.default_rng(0)
+    task_ids, rows, y = [], [], []
+    for t in range(40):
+        for i in range(5):
+            has_tool = (t + i) % 2 == 0
+            conf = rng.normal()
+            rows.append({
+                "mean_logprob": conf, "min_logprob": conf - 1, "p10_logprob": conf - 0.5,
+                # Half the turns are text-only, so the fit sees NaN in these columns.
+                "arg_mean_logprob": conf if has_tool else float("nan"),
+                "arg_min_logprob": conf - 1 if has_tool else float("nan"),
+                "first_tool_token_entropy": 0.3, "n_tokens": 20, "n_tool_calls": int(has_tool),
+                "has_tool_call": int(has_tool), "agreement": float("nan"), "cluster_prior": 0.5,
+                "turn_idx": i, "prefix_tokens": 100,
+            })
+            task_ids.append(f"task{t}")
+            y.append(int(rng.random() < 1 / (1 + np.exp(-conf))))
+
+    result = fit_calibrator(matrix(rows, FEATURES), np.array(y), task_ids, FEATURES)
+    assert result.model is not None
+
+    # `agreement` was NaN for every row, so the gate dropped it and says so.
+    assert "agreement" not in result.feature_order
+    assert any("agreement" in n for n in result.notes)
+
+    text_features = turn_features(choice("answer", tool=None), [], [], 0.5, 0, 100)
+    p = result.model.predict_proba(as_vector(text_features, result.feature_order)[None, :])[0, 1]
+    assert 0.0 <= p <= 1.0, "a text-only turn must score without imputation"
+
+
+def test_a_mask_that_does_not_line_up_yields_no_argument_features():
+    """A misaligned mask describes different tokens; no features beat wrong ones."""
+    from agentdistill.cascade.features import turn_features
+
+    tool_choice = choice("x", tool="refund_order", n_tokens=4)
+    features = turn_features(tool_choice, [True, True], [], 0.5, 0, 100)  # mask shorter than the tokens
+    assert np.isnan(features.arg_mean_logprob)

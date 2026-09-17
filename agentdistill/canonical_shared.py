@@ -1,52 +1,45 @@
-"""Opt-in shared replay hash for MCPGate args_hash_v=1; legacy canonical.py remains unchanged."""
-import hashlib
-import json
-import math
-import re
-from decimal import ROUND_HALF_UP, Decimal, localcontext
+"""The MCPGate-compatible argument hash (`args_hash_v=1` on their side).
 
-DROP = {'request_id', 'trace_id', 'timestamp', 'ts', 'cursor', 'page_token', 'nonce'}
+This is a thin selection of a ruleset, not a second implementation. `canonical.py` holds the only
+canonicalizer in this repo; the two versions differ on exactly one axis -- how numbers render -- and that is a
+field on `Rules`:
 
-def normalize(v):
-    if isinstance(v, dict):
-        return {k: normalize(x) for k, x in v.items() if k not in DROP}
-    if isinstance(v, list):
-        return [normalize(x) for x in v]
-    if isinstance(v, float):
-        if not math.isfinite(v):
-            raise ValueError('Nonfinite number')
-        with localcontext() as ctx:
-            ctx.prec = 100
-            if v.is_integer():
-                return v
-            return float(Decimal.from_float(v).quantize(Decimal('0.000001'), rounding=ROUND_HALF_UP))
-    if isinstance(v, str):
-        v = v.strip()
-        if re.fullmatch(r'\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|z|[+-]\d{2}:?\d{2})?)?', v):
-            return '<ts>'
-        if re.fullmatch(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}', v):
-            return '<uuid>'
-    return v
+- **`canonical.args_hash`** uses JSON semantics, where `1` and `1.0` are different arguments. A tool whose schema
+  says `{"type": "integer"}` accepts one and rejects the other, so the replay index must not collide them.
+- **`canonical_shared.args_hash`** uses JavaScript semantics, where an integral float renders as an integer,
+  because that is what MCPGate's TypeScript implementation produces and what its stored rows assume.
 
-def canonical(v):
-    if isinstance(v, dict):
-        keys = sorted(v, key=lambda k: k.encode())
-        body = ','.join(json.dumps(k, ensure_ascii=False) + ':' + canonical(v[k]) for k in keys)
-        return '{' + body + '}'
-    if isinstance(v, list):
-        return '[' + ','.join(canonical(x) for x in v) + ']'
-    if isinstance(v, (int, float)) and not isinstance(v, bool):
-        if v == 0:
-            return '0'
-        if abs(v) >= 1e21:
-            return json.dumps(v, separators=(',', ':'))
-        if int(v) == v:
-            return str(int(v))
-        return format(v, '.6f').rstrip('0').rstrip('.')
-    return json.dumps(v, ensure_ascii=False, separators=(',', ':'))
+Both hash sets stay valid, and there is one code path to keep correct. Two canonicalizers that agree today are
+two that disagree after the next edit.
 
+Do not use this for approval or integrity hashes: the number normalization is lossy by design.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from agentdistill.canonical import SHARED_RULES, canonical_json
+from agentdistill.canonical import args_hash as _args_hash
+from agentdistill.canonical import normalize as _normalize
 
 ARGS_HASH_VERSION = 1
 
-def args_hash(tool, args):
-    return hashlib.sha256(canonical({'tool': tool, 'args': normalize(args)}).encode('utf-8')).hexdigest()
+#: Re-exported so callers can see which rules they are getting.
+RULES = SHARED_RULES
+DROP = set(SHARED_RULES.drop_keys)
+
+
+def normalize(value: Any) -> Any:
+    """Normalize under the shared ruleset."""
+    return _normalize(value, SHARED_RULES)
+
+
+def canonical(value: Any) -> str:
+    """Serialize an already-normalized value the way JSON.stringify would."""
+    return canonical_json(value, SHARED_RULES.number_format)
+
+
+def args_hash(tool: str, args: Any) -> str:
+    """The shared replay hash. Lowercase hex sha256."""
+    return _args_hash(tool, args, SHARED_RULES)

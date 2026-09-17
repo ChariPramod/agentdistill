@@ -99,14 +99,25 @@ def decide(cmp: dict, current: dict, candidate: dict, cfg: RoundCfg) -> tuple[st
     success = cmp.get("success") or {}
     lo, hi = success.get("ci95", (0.0, 0.0))
     delta_pp = success.get("delta", 0.0) * 100
-    token_delta = (cmp.get("tokens") or {}).get("median_delta", 0.0)
-    cost_better = token_delta < 0
+
+    tokens = cmp.get("tokens") or {}
+    token_delta = tokens.get("median_delta", 0.0)
+    # A saving has to be one the interval supports. `median_delta < 0` promotes on noise: on a small eval set the
+    # median per-task token difference is negative about half the time by chance.
+    token_ci = tokens.get("ci95") or [float("nan"), float("nan")]
+    cost_better = bool(token_ci[1] < 0)
 
     if lo > 0:
         return "promote", f"success up {delta_pp:+.1f} pp, CI [{lo * 100:+.1f}, {hi * 100:+.1f}] excludes zero"
     if lo <= 0 <= hi and delta_pp > -cfg.success_tolerance_pp and cost_better:
         return "promote", (
-            f"success unchanged within tolerance ({delta_pp:+.1f} pp) and tokens down {token_delta:.0f}"
+            f"success unchanged within tolerance ({delta_pp:+.1f} pp) and tokens down {token_delta:.0f} "
+            f"[CI {token_ci[0]:+.0f}, {token_ci[1]:+.0f}]"
+        )
+    if lo <= 0 <= hi and delta_pp > -cfg.success_tolerance_pp and token_delta < 0 and not cost_better:
+        return "discard", (
+            f"success unchanged ({delta_pp:+.1f} pp) and the median token delta is {token_delta:.0f}, but its "
+            f"CI [{token_ci[0]:+.0f}, {token_ci[1]:+.0f}] includes zero, so the saving is not established"
         )
     return "discard", (
         f"success {delta_pp:+.1f} pp with CI [{lo * 100:+.1f}, {hi * 100:+.1f}], cost_better={cost_better}"

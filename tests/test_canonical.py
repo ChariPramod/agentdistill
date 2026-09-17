@@ -9,6 +9,7 @@ import pytest
 
 from agentdistill.canonical import (
     DEFAULT_DROP_KEYS,
+    SHARED_RULES,
     Rules,
     args_hash,
     canonical_args,
@@ -210,3 +211,87 @@ def test_deeply_nested_structures():
         assert "request_id" not in out
         out = out["n"]
     assert out == {"v": 1}
+
+
+# --------------------------------------------------------------------------------------------------------------
+# one implementation, two rulesets
+#
+# The repo has exactly one canonicalizer. The MCPGate-compatible hash is a `Rules` selection on the same code
+# path, not a second implementation, because two that agree today are two that disagree after the next edit.
+# --------------------------------------------------------------------------------------------------------------
+
+
+def test_shared_module_is_a_thin_wrapper_not_a_second_implementation():
+    import agentdistill.canonical_shared as shared
+
+    source = Path(shared.__file__).read_text()
+    assert "hashlib" not in source, "the shared module must not compute its own digest"
+    assert "def _canonical" not in source, "the shared module must not have its own serializer"
+    assert shared.RULES is SHARED_RULES
+
+
+@pytest.mark.parametrize(
+    ("args", "same"),
+    [
+        ({"a": 1}, True),
+        ({"a": 1.5}, True),
+        ({"s": "x"}, True),
+        ({"a": True}, True),
+        ({"a": None}, True),
+        ({"a": 1.0}, False),        # integral float: 1.0 vs 1
+        ({"a": -0.0}, False),       # signed zero
+        ({"a": [1, 2.0]}, False),   # recursively
+    ],
+)
+def test_the_two_rulesets_differ_only_on_number_rendering(args, same):
+    from agentdistill.canonical_shared import args_hash as shared_hash
+
+    assert (args_hash("t", args) == shared_hash("t", args)) is same
+
+
+def test_json_rules_keep_int_and_float_distinct():
+    """A tool whose schema says {"type": "integer"} accepts one and rejects the other."""
+    assert args_hash("t", {"a": 1}) != args_hash("t", {"a": 1.0})
+
+
+def test_js_rules_collide_int_and_integral_float():
+    """JavaScript renders 1.0 as 1, and MCPGate's stored rows assume it."""
+    from agentdistill.canonical_shared import args_hash as shared_hash
+
+    assert shared_hash("t", {"a": 1}) == shared_hash("t", {"a": 1.0})
+
+
+def test_js_rules_round_to_six_decimals():
+    """Both rulesets round at six decimals; float noise below that must not split a hash.
+
+    The shared ruleset uses Decimal half-up to match the TypeScript implementation. On IEEE doubles at this
+    precision the two rounding modes never actually diverge -- no binary double lands on an exact half at the
+    sixth decimal -- so this asserts the rounding, not the tie-breaking rule.
+    """
+    from agentdistill.canonical_shared import args_hash as shared_hash
+    from agentdistill.canonical_shared import normalize as shared_normalize
+
+    assert shared_normalize({"a": 1.23456789})["a"] == pytest.approx(1.234568)
+    assert shared_hash("t", {"a": 1.2345678}) == shared_hash("t", {"a": 1.2345681})
+
+
+def test_non_finite_numbers_are_refused():
+    with pytest.raises(ValueError, match="non-finite"):
+        args_hash("t", {"a": float("inf")})
+
+
+@pytest.mark.parametrize("vector_file", ["canonical-vectors.json", "canonical-shared-vectors.json"])
+def test_both_vector_files_pass_off_the_same_code_path(vector_file):
+    """The definition of done: 19 shared vectors and the v1 vectors, one implementation."""
+    from agentdistill.canonical_shared import args_hash as shared_hash
+
+    path = Path(__file__).resolve().parents[1] / "schemas" / vector_file
+    doc = json.loads(path.read_text())
+    vectors = doc if isinstance(doc, list) else doc.get("vectors", [])
+    assert vectors, f"{vector_file} has no vectors"
+    hasher = shared_hash if "shared" in vector_file else args_hash
+    for v in vectors:
+        expected = v.get("args_hash") or v.get("hash") or v.get("expected")
+        if not expected:
+            continue
+        assert hasher(v.get("tool", "t"), v.get("args", {})) == expected, f"{vector_file}: {v.get('name')}"

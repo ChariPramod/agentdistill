@@ -34,6 +34,12 @@ MAX_ACCEPTABLE_ECE = 0.05
 #: Below this, the gate is not distinguishing good turns from bad ones at all.
 MIN_USEFUL_AUROC = 0.6
 
+#: Minimum minority-class samples per calibration fold.
+MIN_PER_FOLD = 10
+
+#: Below this many minority-class samples, isotonic overfits and sigmoid is used instead.
+ISOTONIC_MIN_MINORITY = 50
+
 
 @dataclass
 class CalibrationResult:
@@ -121,14 +127,29 @@ def metrics(p: np.ndarray, y: np.ndarray) -> dict:
     return out
 
 
-def _new_model(seed: int):
+def _new_model(seed: int, y: np.ndarray | None = None):
+    """The gate's classifier, wrapped in a calibration layer sized to the data.
+
+    HistGradientBoosting handles NaN natively, which is why it is here: "no tool call" means genuinely absent
+    argument features, and imputing them would teach the gate that absence is confidence.
+
+    The calibration wrapper is sized to the smaller class. Isotonic regression needs a reasonable number of
+    samples per fold, and asking for five folds of a hundred turns where one class has twelve members fails
+    inside sklearn rather than producing a bad model -- which is a worse failure, because it happens mid-run.
+    """
     from sklearn.calibration import CalibratedClassifierCV
     from sklearn.ensemble import HistGradientBoostingClassifier
 
-    # HistGradientBoosting handles NaN natively, which matters: "no tool call" means genuinely absent argument
-    # features, and imputing them would teach the gate that absence is confidence.
     base = HistGradientBoostingClassifier(max_depth=3, learning_rate=0.05, max_iter=300, random_state=seed)
-    return CalibratedClassifierCV(base, method="isotonic", cv=5)
+    if y is None:
+        return CalibratedClassifierCV(base, method="isotonic", cv=5)
+
+    minority = int(min(np.bincount(y.astype(int), minlength=2)))
+    folds = max(2, min(5, minority // MIN_PER_FOLD))
+    # Isotonic is a step function fitted per fold; below this it overfits to a handful of points, and sigmoid
+    # (a two-parameter fit) is the better-behaved choice.
+    method = "isotonic" if minority >= ISOTONIC_MIN_MINORITY else "sigmoid"
+    return CalibratedClassifierCV(base, method=method, cv=folds)
 
 
 def fit_calibrator(
@@ -154,6 +175,25 @@ def fit_calibrator(
             n_turns=len(y), n_tasks=n_tasks, label_mix=label_mix or {}, model=None, notes=notes,
         )
 
+    # A feature with no finite value anywhere carries no signal, and HistGradientBoosting cannot bin it -- it
+    # raises rather than ignoring the column. This is not hypothetical: `agreement` is NaN for every turn
+    # whenever self-consistency sampling is off (`cascade.k_samples: 0`), which is the default in tiny mode.
+    keep = [i for i in range(X.shape[1]) if np.isfinite(X[:, i]).any()]
+    dropped = [feature_order[i] for i in range(X.shape[1]) if i not in keep]
+    if dropped:
+        notes.append(
+            f"dropped {dropped} from the gate: no turn had a value for them. "
+            f"`agreement` appears here when cascade.k_samples is 0, which switches off self-consistency."
+        )
+        X = X[:, keep]
+        feature_order = [feature_order[i] for i in keep]
+    if not feature_order:
+        notes.append("every feature was empty; no gate can be fitted. Escalate everything.")
+        return CalibrationResult(
+            feature_order=[], holdout={}, in_sample={}, reliability_bins=[],
+            n_turns=len(y), n_tasks=n_tasks, label_mix=label_mix or {}, model=None, notes=notes,
+        )
+
     if len(set(y.tolist())) < 2:
         # Every turn carries the same label, so there is nothing to discriminate. This is not a modelling
         # failure; it means the label set cannot support a gate, and pretending otherwise would ship a
@@ -175,15 +215,28 @@ def fit_calibrator(
         )
         fit_idx, hold_idx = np.arange(len(y)), np.arange(len(y))
 
-    fitted = _new_model(seed)
-    fitted.fit(X[fit_idx], y[fit_idx])
-    p_hold = fitted.predict_proba(X[hold_idx])[:, 1]
+    try:
+        fitted = _new_model(seed, y[fit_idx])
+        fitted.fit(X[fit_idx], y[fit_idx])
+        p_hold = fitted.predict_proba(X[hold_idx])[:, 1]
+    except Exception as e:
+        # A gate that cannot be fitted is a gate that escalates everything. Crashing here would take down a
+        # GPU-day stage for a data shape the caller can do nothing about mid-run.
+        notes.append(
+            f"the calibrator could not be fitted ({type(e).__name__}: {e}). Escalate everything, and check the "
+            f"turn labels and feature coverage."
+        )
+        return CalibrationResult(
+            feature_order=feature_order, holdout={}, in_sample={}, reliability_bins=[],
+            n_turns=len(y), n_tasks=n_tasks, label_mix=label_mix or {}, model=None, notes=notes,
+        )
+
     holdout = metrics(p_hold, y[hold_idx])
     bins = reliability_bins(p_hold, y[hold_idx])
 
     # The artifact is refit on everything: reporting holdout numbers is about honesty, not about shipping a
     # weaker model.
-    shipped = _new_model(seed)
+    shipped = _new_model(seed, y)
     shipped.fit(X, y)
     p_in = shipped.predict_proba(X)[:, 1]
     in_sample = metrics(p_in, y)
@@ -240,11 +293,29 @@ def load(path: str | Path) -> tuple[Any, dict]:
     return model, report
 
 
-def assert_feature_order(report: dict, configured: list[str] | tuple[str, ...]) -> None:
-    """A reordered feature vector scores silently and wrongly, so the runtime checks before it scores."""
+def assert_feature_order(report: dict, configured: list[str] | tuple[str, ...]) -> list[str]:
+    """Check the runtime can build the vector the model was fitted on, and return that order.
+
+    The stored order is authoritative: it may be a subset of the configured features, because calibration drops
+    columns that had no values. What must not happen is the runtime building a vector in a different order, or
+    containing a feature the model never saw -- either scores silently and wrongly.
+    """
     stored = list(report.get("feature_order") or [])
-    if stored != list(configured):
+    configured_list = list(configured)
+    if not stored:
+        raise ValueError("the calibration records no feature order; it cannot be used to score")
+
+    missing = [f for f in stored if f not in configured_list]
+    if missing:
         raise ValueError(
-            f"the calibration was fitted on features {stored} but the runtime is configured for "
-            f"{list(configured)}. Scoring with a different order produces confident nonsense."
+            f"the calibration was fitted on {missing}, which the runtime is not configured to produce. "
+            f"Configured: {configured_list}. Scoring without them produces confident nonsense."
         )
+    # The stored order must be a subsequence of the configured one, or the two disagree about position.
+    positions = [configured_list.index(f) for f in stored]
+    if positions != sorted(positions):
+        raise ValueError(
+            f"the calibration's feature order {stored} is not in the configured order {configured_list}. "
+            f"Scoring with a different order produces confident nonsense."
+        )
+    return stored

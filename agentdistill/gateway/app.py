@@ -34,6 +34,9 @@ from agentdistill.gateway.state import GatewayState
 
 logger = logging.getLogger(__name__)
 
+#: Sustained fallbacks above this fail the health check and log at error level.
+FALLBACK_ALERT_RATE = 0.20
+
 app = FastAPI(title="agentdistill gateway")
 gw: GatewayState = GatewayState.uninitialized()
 
@@ -87,7 +90,11 @@ async def handle(req: dict) -> tuple[dict, dict, dict]:
             logger.warning("student backend failed (%s); falling back to the teacher", e)
             data = await gw.teacher.chat(req["messages"], req["tools"], temperature=req["temperature"])
             choice, usage = data["choices"][0], data.get("usage", {})
-            arm_meta = {"arm": "teacher", "escalated": True, "fallback": True, "fallback_reason": str(e)}
+            arm_meta = {
+                "arm": "teacher", "escalated": True, "fallback": True, "fallback_reason": str(e),
+                "teacher_tokens": data.get("usage", {}).get("completion_tokens", 0),
+            }
+            await _check_fallback_rate()
         else:
             raise HTTPException(status_code=502, detail=str(e)) from e
 
@@ -191,6 +198,23 @@ def _stream(events: list[str], meta: dict) -> StreamingResponse:
     return StreamingResponse(generate(), media_type="text/event-stream", headers=headers)
 
 
+async def _check_fallback_rate() -> None:
+    """Log loudly when fallbacks stop being occasional.
+
+    A single fallback is a blip. A sustained rate means the student is down and every request is being billed to
+    the teacher while the gateway reports success.
+    """
+    if gw.log is None:
+        return
+    stats = gw.log.fallback_rate()
+    if stats["requests"] >= 5 and stats["rate"] > FALLBACK_ALERT_RATE:
+        logger.error(
+            "gateway fallback rate %.0f%% over the last %ds (%d of %d requests). The student backend is failing "
+            "and every one of these is a teacher call nobody chose to make.",
+            stats["rate"] * 100, stats["window_seconds"], stats["fallbacks"], stats["requests"],
+        )
+
+
 @app.post("/v1/feedback")
 async def feedback(body: dict):
     """Report whether a request's task actually worked.
@@ -206,6 +230,11 @@ async def feedback(body: dict):
         raise HTTPException(status_code=404, detail=f"unknown request_id {request_id}")
 
     record = await gw.log.get(request_id)
+    # A fallback updates neither arm. The student never ran, and the teacher was not chosen on merit -- crediting
+    # either would teach the router from an outage.
+    if record and record.get("fallback"):
+        return {"ok": True, "request_id": request_id, "router_updated": False,
+                "note": "fallback request; neither arm's posterior was updated"}
     if gw.router and record and record.get("cluster_id") is not None and record.get("arm") in ("student", "teacher"):
         gw.router.update(record["cluster_id"], record["arm"], bool(body.get("success")))
         if getattr(gw, "router_store", None):
@@ -215,7 +244,15 @@ async def feedback(body: dict):
 
 @app.get("/healthz")
 async def healthz():
-    return gw.health()
+    health = gw.health()
+    if gw.log is not None:
+        stats = gw.log.fallback_rate()
+        health["fallback"] = stats
+        if stats["requests"] >= 5 and stats["rate"] > FALLBACK_ALERT_RATE:
+            health["ok"] = False
+            health["notes"] = [*health.get("notes", []),
+                               f"fallback rate {stats['rate']:.0%} over {stats['window_seconds']}s"]
+    return health
 
 
 @app.get("/v1/models")

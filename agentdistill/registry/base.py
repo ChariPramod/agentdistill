@@ -17,10 +17,22 @@ from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.exc import OperationalError
 
 MIGRATIONS = Path(__file__).resolve().parent / "migrations"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 #: Migrations are applied in order; each is idempotent.
-MIGRATION_FILES = ("001_init.sql", "002_eval_results.sql", "003_phase3.sql")
+MIGRATION_FILES = (
+    "001_init.sql",
+    "002_eval_results.sql",
+    "003_phase3.sql",
+    "004_phase3c.sql",
+)
+
+
+def invocation() -> str:
+    """The command that produced a row, so a report can print how to reproduce it."""
+    import sys
+
+    return " ".join(sys.argv)
 
 
 def utcnow() -> str:
@@ -386,9 +398,9 @@ class Registry:
             conn.execute(
                 text(
                     """INSERT INTO training_runs (id, dataset_id, base_model, method, parent_adapter_id, config,
-                                                  metrics, adapter_path, status, started_at, ended_at)
+                                                  metrics, adapter_path, status, started_at, ended_at, command)
                        VALUES (:id, :dataset_id, :base_model, :method, :parent_adapter_id, :config,
-                               :metrics, :adapter_path, :status, :started_at, :ended_at)"""
+                               :metrics, :adapter_path, :status, :started_at, :ended_at, :command)"""
                 ),
                 {
                     **run,
@@ -397,6 +409,7 @@ class Registry:
                     "parent_adapter_id": run.get("parent_adapter_id"),
                     "adapter_path": run.get("adapter_path"),
                     "ended_at": run.get("ended_at"),
+                    "command": run.get("command") or invocation(),
                 },
             )
 
@@ -582,11 +595,12 @@ class Registry:
         with self.engine.begin() as conn:
             conn.execute(
                 text(
-                    """INSERT INTO eval_runs (id, eval_set_id, subject, n_per_task, metrics, started_at, tag)
-                       VALUES (:id, :es, :subject, :n, :metrics, :started, :tag)"""
+                    """INSERT INTO eval_runs (id, eval_set_id, subject, n_per_task, metrics, started_at, tag,
+                                             command)
+                       VALUES (:id, :es, :subject, :n, :metrics, :started, :tag, :command)"""
                 ),
                 {"id": run_id, "es": eval_set_id, "subject": subject, "n": n_per_task,
-                 "metrics": dumps({}), "started": utcnow(), "tag": tag},
+                 "metrics": dumps({}), "started": utcnow(), "tag": tag, "command": invocation()},
             )
 
     def write_eval_result(self, run_id: str, outcome: Any, cluster: int | None = None,

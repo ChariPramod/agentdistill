@@ -153,24 +153,40 @@ def wilcoxon_metric(a: dict[str, float], b: dict[str, float]) -> dict:
     nonzero = diff[diff != 0]
     if len(nonzero) < 1:
         return {"n_tasks": len(tasks), "median_a": float(np.median(va)), "median_b": float(np.median(vb)),
-                "median_delta": 0.0, "p": 1.0, "note": "identical on every task"}
+                "median_delta": 0.0, "ci95": [0.0, 0.0], "p": 1.0, "note": "identical on every task"}
     from scipy.stats import wilcoxon
 
     try:
         stat, p = wilcoxon(va, vb, zero_method="wilcox", alternative="two-sided")
     except ValueError:
         return {"n_tasks": len(tasks), "median_a": float(np.median(va)), "median_b": float(np.median(vb)),
-                "median_delta": float(np.median(diff)), "p": 1.0, "note": "too few nonzero differences"}
+                "median_delta": float(np.median(diff)), "ci95": list(_median_diff_ci(diff)), "p": 1.0,
+                "note": "too few nonzero differences"}
     rel = float(np.median(diff) / np.median(vb)) if np.median(vb) else float("nan")
     return {
         "n_tasks": len(tasks),
         "median_a": float(np.median(va)),
         "median_b": float(np.median(vb)),
         "median_delta": float(np.median(diff)),
+        "ci95": list(_median_diff_ci(diff)),
         "relative_delta": rel,
         "statistic": float(stat),
         "p": float(p),
     }
+
+
+def _median_diff_ci(diff: np.ndarray, iters: int = 5000, seed: int = 0) -> tuple[float, float]:
+    """Bootstrap interval on the median per-task difference.
+
+    A promotion that rests on a point estimate promotes on noise. The interval is what lets a caller ask whether
+    the saving is real rather than whether it happened to be negative this run.
+    """
+    if len(diff) < 2:
+        return (float("nan"), float("nan"))
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, len(diff), size=(iters, len(diff)))
+    boots = np.median(diff[idx], axis=1)
+    return (float(np.percentile(boots, 2.5)), float(np.percentile(boots, 97.5)))
 
 
 def holm(pvalues: dict[str, float], alpha: float = 0.05) -> dict[str, dict]:

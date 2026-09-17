@@ -150,13 +150,17 @@ def from_calibration(
     from agentdistill.cascade.calibrate import assert_feature_order, load
 
     model, report = load(calibration_dir)
-    assert_feature_order(report, configured_features)
+    # The stored order wins: calibration may have dropped features that had no values, and the model expects
+    # exactly the columns it was fitted on.
+    effective = assert_feature_order(report, configured_features) if model is not None else list(
+        configured_features
+    )
     usable = model is not None and report.get("usable", False)
     return CascadeTurnClient(
         student=student,
         teacher=teacher,
         calibrator=model,
-        feature_names=list(configured_features),
+        feature_names=effective,
         threshold=threshold if threshold is not None else 1.0,
         k_samples=k_samples,
         cluster_prior=cluster_prior,

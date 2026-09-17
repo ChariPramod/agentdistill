@@ -193,3 +193,58 @@ def test_unfitted_result_saves_a_report_without_a_model(tmp_path):
     assert model is None
     assert report["usable"] is False
     assert report["notes"]
+
+
+# --------------------------------------------------------------------------------------------------------------
+# features with no values
+#
+# `agreement` is NaN on every turn when self-consistency sampling is off, which is the default in tiny mode.
+# HistGradientBoosting cannot bin an all-NaN column and raises, so this must be handled before the fit.
+# --------------------------------------------------------------------------------------------------------------
+
+
+def test_an_all_nan_feature_is_dropped_and_reported():
+    task_ids, X, y = synth(n_tasks=80, signal=1.5)
+    X[:, 2] = np.nan  # stands in for `agreement` with k_samples = 0
+    res = fit_calibrator(X, y, task_ids, NAMES)
+    assert res.model is not None, "a dead column must not take down the whole fit"
+    assert res.feature_order == NAMES[:2]
+    assert any("noise" in n for n in res.notes)
+
+
+def test_dropping_a_feature_still_produces_holdout_metrics():
+    task_ids, X, y = synth(n_tasks=100, signal=2.0)
+    X[:, 2] = np.nan
+    res = fit_calibrator(X, y, task_ids, NAMES)
+    assert res.holdout["n"] > 0
+    assert res.holdout["auroc"] == res.holdout["auroc"]  # not NaN
+
+
+def test_every_feature_empty_cannot_support_a_gate():
+    task_ids, X, y = synth(n_tasks=80)
+    X[:] = np.nan
+    res = fit_calibrator(X, y, task_ids, NAMES)
+    assert res.model is None and not res.usable
+    assert any("every feature was empty" in n for n in res.notes)
+
+
+def test_the_saved_artifact_records_the_reduced_order(tmp_path):
+    task_ids, X, y = synth(n_tasks=100, signal=2.0)
+    X[:, 2] = np.nan
+    res = fit_calibrator(X, y, task_ids, NAMES)
+    _model, report = load(save(res, tmp_path / "cal"))
+    assert report["feature_order"] == NAMES[:2], "the runtime must build exactly the columns the model saw"
+
+
+def test_a_calibrator_that_cannot_be_fitted_degrades_instead_of_raising(monkeypatch):
+    """A GPU-day stage must not die for a data shape the caller cannot fix mid-run."""
+    import agentdistill.cascade.calibrate as calibrate_module
+
+    def explode(*a, **kw):
+        raise RuntimeError("sklearn said no")
+
+    monkeypatch.setattr(calibrate_module, "_new_model", explode)
+    task_ids, X, y = synth(n_tasks=80)
+    res = fit_calibrator(X, y, task_ids, NAMES)
+    assert res.model is None and not res.usable
+    assert "could not be fitted" in res.notes[-1]

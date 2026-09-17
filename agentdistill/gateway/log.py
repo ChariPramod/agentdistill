@@ -43,6 +43,8 @@ class RequestLog:
             "latency_ms": meta.get("latency_ms"),
             "outcome": None,
             "trace_id": None,
+            "fallback": bool(meta.get("fallback", False)),
+            "fallback_reason": meta.get("fallback_reason"),
             "payload": dumps({
                 "model": request.get("model"),
                 "n_messages": len(request.get("messages") or []),
@@ -58,10 +60,10 @@ class RequestLog:
                     text(
                         """INSERT INTO requests (id, received_at, cluster_id, arm, adapter_id, confidence,
                                                  escalated, student_tokens, teacher_tokens, cost_usd, latency_ms,
-                                                 outcome, trace_id, payload)
+                                                 outcome, trace_id, payload, fallback, fallback_reason)
                            VALUES (:id, :received_at, :cluster_id, :arm, :adapter_id, :confidence, :escalated,
                                    :student_tokens, :teacher_tokens, :cost_usd, :latency_ms, :outcome, :trace_id,
-                                   :payload)"""
+                                   :payload, :fallback, :fallback_reason)"""
                     ),
                     params,
                 )
@@ -84,6 +86,30 @@ class RequestLog:
         with self.registry.engine.connect() as conn:
             row = conn.execute(text("SELECT * FROM requests WHERE id = :id"), {"id": request_id}).mappings().first()
         return dict(row) if row else None
+
+    def fallback_rate(self, window_seconds: int = 300) -> dict:
+        """Rolling fallback rate.
+
+        A fallback means the student never ran, so every one of these is a teacher call nobody chose to make.
+        Left uncounted, a broken vLLM turns into a quiet 100% teacher bill.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from sqlalchemy import text
+
+        cutoff = (datetime.now(UTC) - timedelta(seconds=window_seconds)).isoformat()
+        with self.registry.engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT fallback FROM requests WHERE received_at >= :since"), {"since": cutoff}
+            ).fetchall()
+        total = len(rows)
+        fallbacks = sum(1 for r in rows if r[0])
+        return {
+            "window_seconds": window_seconds,
+            "requests": total,
+            "fallbacks": fallbacks,
+            "rate": (fallbacks / total) if total else 0.0,
+        }
 
     def recent(self, limit: int = 100) -> list[dict]:
         from sqlalchemy import text

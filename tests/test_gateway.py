@@ -345,3 +345,112 @@ def test_models_lists_the_eval_names(client):
     c, _ = client
     ids = {m["id"] for m in c.get("/v1/models").json()["data"]}
     assert {"teacher", "student", "student:prod-v1", "cascade:prod-v1:auto", TEACHER_NAME} <= ids
+
+
+# --------------------------------------------------------------------------------------------------------------
+# fallback accounting
+#
+# A silent fallback is how a broken vLLM becomes a quiet 100% teacher bill. Every one is counted, surfaced on
+# /healthz, and kept out of the router's posteriors.
+# --------------------------------------------------------------------------------------------------------------
+
+
+def broken_student(state):
+    from agentdistill.gateway.backends import BackendError
+
+    async def fail(*a, **kw):
+        raise BackendError("student is unreachable")
+
+    state.student.chat = fail
+    return state
+
+
+def test_a_fallback_is_flagged_on_the_request_row(registry):
+    state = broken_student(build_state(registry))
+    app_module.set_state(state)
+    with TestClient(app_module.app) as c:
+        ask(c, model="student")
+    row = state.log.recent()[0]
+    assert row["fallback"]
+    assert "unreachable" in row["fallback_reason"]
+    assert row["arm"] == "teacher", "the teacher answered, so that is the arm that was billed"
+
+
+def test_a_normal_request_is_not_flagged_as_a_fallback(client):
+    c, state = client
+    ask(c, model="student")
+    assert not state.log.recent()[0]["fallback"]
+
+
+def test_fallback_rate_is_reported_on_healthz(registry):
+    state = broken_student(build_state(registry))
+    app_module.set_state(state)
+    with TestClient(app_module.app) as c:
+        for _ in range(6):
+            ask(c, model="student")
+        health = c.get("/healthz").json()
+    assert health["fallback"]["fallbacks"] == 6
+    assert health["fallback"]["rate"] == 1.0
+    assert health["ok"] is False, "a sustained fallback rate is not healthy"
+    assert any("fallback rate" in n for n in health["notes"])
+
+
+def test_a_single_fallback_does_not_fail_the_health_check(registry):
+    """One blip is not an outage; the alert is for a sustained rate."""
+    state = build_state(registry)
+    app_module.set_state(state)
+    with TestClient(app_module.app) as c:
+        for _ in range(9):
+            ask(c, model="student")
+        broken_student(state)
+        ask(c, model="student")
+        health = c.get("/healthz").json()
+    assert health["fallback"]["rate"] == 0.1
+    assert health["ok"] is True
+
+
+def test_a_sustained_fallback_rate_logs_at_error_level(registry, caplog):
+    import logging
+
+    state = broken_student(build_state(registry))
+    app_module.set_state(state)
+    with caplog.at_level(logging.ERROR), TestClient(app_module.app) as c:
+        for _ in range(6):
+            ask(c, model="student")
+    assert any("fallback rate" in r.message for r in caplog.records if r.levelno >= logging.ERROR)
+
+
+def test_feedback_on_a_fallback_updates_neither_arm(registry):
+    """The student never ran, and the teacher was not chosen on merit."""
+
+    class SpyRouter:
+        def __init__(self):
+            self.updates = []
+
+        def choose(self, cluster):
+            return "student"
+
+        def update(self, cluster, arm, success):
+            self.updates.append((cluster, arm, success))
+
+        def state_mean(self, cluster, arm):
+            return 0.5
+
+    state = broken_student(build_state(registry))
+    state.router = SpyRouter()
+    app_module.set_state(state)
+    with TestClient(app_module.app) as c:
+        request_id = ask(c, model="student").json()["agentdistill"]["request_id"]
+        result = c.post("/v1/feedback", json={"request_id": request_id, "success": True}).json()
+    assert result["router_updated"] is False
+    assert state.router.updates == [], "an outage must not teach the router"
+
+
+def test_the_outcome_is_still_recorded_on_a_fallback(registry):
+    """The request is still training data; it is only the router that must not learn from it."""
+    state = broken_student(build_state(registry))
+    app_module.set_state(state)
+    with TestClient(app_module.app) as c:
+        request_id = ask(c, model="student").json()["agentdistill"]["request_id"]
+        c.post("/v1/feedback", json={"request_id": request_id, "success": True})
+    assert state.log.recent()[0]["outcome"]

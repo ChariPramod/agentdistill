@@ -24,10 +24,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from decimal import ROUND_HALF_UP, Decimal, localcontext
+from typing import Any, Literal
 
 CANONICAL_VERSION = 1
 
@@ -53,6 +55,15 @@ _ISO8601 = re.compile(
 )
 
 
+#: How numbers are rendered. The only axis on which the two hash versions in this repo differ.
+#:
+#: `json`  - Python/JSON semantics: `1.0` renders as `1.0` and stays distinct from `1`. A tool whose schema says
+#:           `{"type": "integer"}` would reject one and accept the other, so they are different arguments.
+#: `js`    - JavaScript semantics, which MCPGate's TypeScript implementation produces: an integral float renders
+#:           as an integer, so `1.0` and `1` collide, and signed zero is flattened.
+NumberFormat = Literal["json", "js"]
+
+
 @dataclass(frozen=True)
 class Rules:
     """How to normalize one tool's arguments."""
@@ -61,6 +72,7 @@ class Rules:
     float_precision: int = FLOAT_PRECISION
     normalize_timestamps: bool = True
     normalize_uuids: bool = True
+    number_format: NumberFormat = "json"
     #: Applied to the whole argument object before the generic rules. Use for tool-specific quirks, such as a
     #: tool that accepts either `email` or `customer_email` for the same thing.
     custom: Callable[[dict], dict] | None = field(default=None, compare=False)
@@ -98,9 +110,20 @@ def _normalize_number(value: float | int, rules: Rules) -> Any:
         return value
     if isinstance(value, int):
         return value
+    if not math.isfinite(value):
+        raise ValueError(f"cannot canonicalize a non-finite number: {value!r}")
+    if rules.number_format == "js":
+        # Half-up at the sixth decimal, matching the TypeScript implementation. Python's round() is
+        # banker's rounding, which would disagree on exact halves.
+        if float(value).is_integer():
+            return float(value) + 0.0
+        with localcontext() as ctx:
+            ctx.prec = 100
+            quantum = Decimal(1).scaleb(-rules.float_precision)
+            return float(Decimal.from_float(value).quantize(quantum, rounding=ROUND_HALF_UP))
     rounded = round(float(value), rules.float_precision)
-    # 7.0 and 7 must not collide: a float stays a float. But -0.0 normalizes to 0.0 so the sign of zero,
-    # which no tool means anything by, does not split a hash.
+    # 7.0 and 7 must not collide under `json` rules: a float stays a float. But -0.0 normalizes to 0.0, since
+    # the sign of zero is not something any tool means anything by.
     return rounded + 0.0
 
 
@@ -125,15 +148,40 @@ def normalize(value: Any, rules: Rules | None = None) -> Any:
     return value
 
 
-def canonical_json(value: Any) -> str:
+def canonical_json(value: Any, number_format: NumberFormat = "json") -> str:
     """Serialize an already-normalized value to its canonical text form."""
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    if number_format == "json":
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return _canonical_js(value)
+
+
+def _canonical_js(value: Any) -> str:
+    """Serialize the way `JSON.stringify` would render numbers.
+
+    Keys sort byte-wise, and an integral float prints without its fractional part -- which is what a TypeScript
+    implementation produces and what MCPGate's stored hashes assume.
+    """
+    if isinstance(value, dict):
+        keys = sorted(value, key=lambda k: str(k).encode("utf-8"))
+        body = ",".join(json.dumps(k, ensure_ascii=False) + ":" + _canonical_js(value[k]) for k in keys)
+        return "{" + body + "}"
+    if isinstance(value, list):
+        return "[" + ",".join(_canonical_js(v) for v in value) + "]"
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if value == 0:
+        return "0"
+    if abs(value) >= 1e21:
+        return json.dumps(value, separators=(",", ":"))
+    if int(value) == value:
+        return str(int(value))
+    return format(value, ".6f").rstrip("0").rstrip(".")
 
 
 def canonical_args(tool: str, args: Any, rules: Rules | None = None) -> str:
     """The canonical text whose sha256 is `args_hash`."""
     r = rules or rules_for(tool)
-    return canonical_json({"args": normalize(args, r), "tool": tool})
+    return canonical_json({"args": normalize(args, r), "tool": tool}, r.number_format)
 
 
 def args_hash(tool: str, args: Any, rules: Rules | None = None) -> str:
@@ -144,3 +192,8 @@ def args_hash(tool: str, args: Any, rules: Rules | None = None) -> str:
 def hash_json(value: Any) -> str:
     """sha256 of an arbitrary already-normalized JSON value. For content addressing outside tool calls."""
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+#: The MCPGate-compatible ruleset (`args_hash_v=1` on their side). Same code path as the default; only the
+#: number rendering differs. Exposed here so there is exactly one implementation in the repo.
+SHARED_RULES = Rules(number_format="js")

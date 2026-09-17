@@ -12,10 +12,15 @@ import pytest
 from agentdistill.train.onpolicy import RoundCfg, Stages, decide, plan, run_round, run_rounds
 
 
-def cmp_dict(delta: float, lo: float, hi: float, token_delta: float = 0.0) -> dict:
+def cmp_dict(delta: float, lo: float, hi: float, token_delta: float = 0.0,
+             token_ci: tuple[float, float] | None = None) -> dict:
+    """A comparison dict. `token_ci` defaults to an interval that supports the median, so existing cases that
+    mean "cost clearly improved" keep meaning that."""
+    if token_ci is None:
+        token_ci = (token_delta * 2 - 1, token_delta / 2) if token_delta < 0 else (token_delta - 1, token_delta + 1)
     return {
         "success": {"delta": delta, "ci95": (lo, hi), "mean_a": 0.7, "mean_b": 0.7 - delta},
-        "tokens": {"median_delta": token_delta},
+        "tokens": {"median_delta": token_delta, "ci95": list(token_ci)},
         "turns": {"median_delta": 0.0},
     }
 
@@ -115,6 +120,28 @@ def test_discard_on_equal_success_without_a_cost_saving():
     decision, reason = decide(cmp_dict(0.001, -0.03, 0.03, token_delta=+5), metrics(), metrics(), RoundCfg())
     assert decision == "discard"
     assert "cost_better=False" in reason
+
+
+def test_a_token_saving_whose_interval_includes_zero_does_not_promote():
+    """`median_delta < 0` alone promotes on noise: on a small eval set it is negative about half the time."""
+    cmp = cmp_dict(0.0, -0.03, 0.03, token_delta=-12, token_ci=(-40.0, +18.0))
+    decision, reason = decide(cmp, metrics(), metrics(), RoundCfg())
+    assert decision == "discard"
+    assert "CI" in reason and "includes zero" in reason
+
+
+def test_a_token_saving_whose_interval_excludes_zero_promotes():
+    cmp = cmp_dict(0.0, -0.03, 0.03, token_delta=-40, token_ci=(-70.0, -12.0))
+    decision, reason = decide(cmp, metrics(), metrics(), RoundCfg())
+    assert decision == "promote"
+    assert "tokens down" in reason
+
+
+def test_a_missing_token_interval_is_not_a_saving():
+    """NaN comparisons are False, so an absent CI must never read as an improvement."""
+    cmp = cmp_dict(0.0, -0.03, 0.03, token_delta=-40)
+    cmp["tokens"].pop("ci95")
+    assert decide(cmp, metrics(), metrics(), RoundCfg())[0] == "discard"
 
 
 def test_discard_when_success_dropped_beyond_tolerance():

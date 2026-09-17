@@ -199,3 +199,94 @@ def test_bos_token_text_detects_whether_the_template_emits_one(tokenizer):
 
 def test_rendered_pair_is_json_serializable(tokenizer):
     json.dumps(render_pair(tokenizer, pair()))
+
+
+# --------------------------------------------------------------------------------------------------------------
+# what a pair teaches
+#
+# Recorded per pair so the report can show what the DPO set was made of. A set that is mostly `text` is teaching
+# phrasing under a preference loss, which is a warning sign rather than an error.
+# --------------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("chosen", "rejected", "expected"),
+    [
+        (
+            {"role": "assistant", "content": "a", "tool_calls": [make_call("c", "refund_order", {"id": "o1"})]},
+            {"role": "assistant", "content": "b", "tool_calls": [make_call("c", "cancel_order", {"id": "o1"})]},
+            "tool_choice",
+        ),
+        (
+            {"role": "assistant", "content": "a", "tool_calls": [make_call("c", "refund_order", {"id": "o1"})]},
+            {"role": "assistant", "content": "b", "tool_calls": [make_call("c", "refund_order", {"id": "o9"})]},
+            "tool_args",
+        ),
+        (
+            {"role": "assistant", "content": "a", "tool_calls": [make_call("c", "refund_order", {"id": "o1"})]},
+            {"role": "assistant", "content": "I cannot do that."},
+            "tool_vs_text",
+        ),
+        (
+            {"role": "assistant", "content": "I refunded it."},
+            {"role": "assistant", "content": "I cannot help with that."},
+            "text",
+        ),
+    ],
+)
+def test_diff_kind_classifies_what_separates_the_sides(chosen, rejected, expected):
+    from agentdistill.train.dpo_data import diff_kind
+
+    assert diff_kind(pair(chosen=[chosen], rejected=[rejected])) == expected
+
+
+@pytest.mark.parametrize(
+    "rejected_text",
+    ["I  refunded   it.", "I REFUNDED IT.", "I refunded it!!!", "i refunded it"],
+)
+def test_text_pairs_differing_only_in_style_are_rejected(rejected_text):
+    """The mirror of the tool-call rule: a style preference under a decision loss teaches house style."""
+    p = pair(chosen=[{"role": "assistant", "content": "I refunded it."}],
+             rejected=[{"role": "assistant", "content": rejected_text}])
+    ok, why = pair_is_valid(p)
+    assert not ok and "apart from formatting" in why
+
+
+def test_text_pairs_that_genuinely_differ_are_kept():
+    p = pair(chosen=[{"role": "assistant", "content": "I refunded $42.50."}],
+             rejected=[{"role": "assistant", "content": "I was not able to refund that."}])
+    assert pair_is_valid(p)[0]
+
+
+def test_filter_pairs_tags_each_kept_pair():
+    from agentdistill.train.dpo_data import DIFF_KINDS
+
+    kept, _ = filter_pairs([pair(), pair(rejected_tool="refund_order")])
+    assert all(p["diff_kind"] in DIFF_KINDS for p in kept)
+
+
+def test_diff_kind_mix_and_warnings():
+    from agentdistill.train.dpo_data import diff_kind_mix, diff_kind_warnings
+
+    text_pairs = [
+        pair(chosen=[{"role": "assistant", "content": f"answer {i}"}],
+             rejected=[{"role": "assistant", "content": f"other {i}"}])
+        for i in range(9)
+    ]
+    kept, _ = filter_pairs([*text_pairs, pair()])
+    mix = diff_kind_mix(kept)
+    assert mix["text"] == 9 and mix["tool_choice"] == 1
+    warnings = diff_kind_warnings(mix)
+    assert any("differ only in prose" in w for w in warnings)
+
+
+def test_a_set_with_no_tool_difference_is_flagged():
+    from agentdistill.train.dpo_data import diff_kind_warnings
+
+    warnings = diff_kind_warnings({"text": 5, "tool_vs_text": 0, "tool_args": 0, "tool_choice": 0})
+    assert any("cannot teach tool selection" in w for w in warnings)
+
+
+def test_rendered_pairs_carry_the_diff_kind(tokenizer):
+    out = render_pair(tokenizer, pair())
+    assert out["diff_kind"] == "tool_choice"
