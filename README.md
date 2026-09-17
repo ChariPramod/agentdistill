@@ -47,6 +47,17 @@ agentdistill eval compare <adapter-run> <base-run>       # paired delta with a 9
 
 Every dataset is immutable and carries `reports/curation-<dataset>.md`, which states exactly what was dropped and why.
 
+## Results
+
+Nothing yet. This project has not run on a GPU, and a README with plausible numbers in it is worse than one with
+none. The markers below are filled by `agentdistill report --format md --inject README.md`, which writes only
+what it can support and lists every claim it could not make.
+
+<!-- agentdistill:results:begin -->
+<!-- agentdistill:results:end -->
+
+See [docs/results.md](docs/results.md) for what each column will mean and why break-even volume comes first.
+
 ## Design principles
 
 1. **The eval harness is the ground truth.** Nothing is promoted on loss curves. Every claim is a paired comparison
