@@ -177,7 +177,7 @@ def test_stages_that_load_a_local_model_pin_the_backend():
         if not stripped.startswith("s_") or "{ ad " not in stripped:
             continue
         loads_weights = (
-            ("ad eval run" in stripped and "ad eval run teacher" not in stripped)
+            ("ad eval run" in stripped and "$TEACHER_SUBJECT" not in stripped)
             or "ad adapter merge" in stripped
             or "ad train onpolicy" in stripped
         )
@@ -191,9 +191,57 @@ def test_stages_that_load_a_local_model_pin_the_backend():
 
 
 def test_the_teacher_stage_does_not_pin_a_local_backend():
-    """`eval run teacher` calls the teacher's API. A --backend there would suggest it loads weights."""
+    """The teacher is an API. A `--backend` there would suggest it loads weights locally."""
     for line in SCRIPT.read_text().splitlines():
-        if "ad eval run teacher" in line:
+        if "$TEACHER_SUBJECT" in line and "ad eval run" in line:
             assert "--backend" not in line
             return
     raise AssertionError("the script no longer evaluates the teacher")
+
+
+def test_tiny_mode_replays_the_recording_instead_of_calling_a_teacher():
+    """A rehearsal must not spend money. `recorded` is free and is literally what the teacher did -- which is
+    why it rehearses the stage without pretending to be a teacher baseline."""
+    text = SCRIPT.read_text()
+    assert 'TEACHER_SUBJECT="${TEACHER_SUBJECT:-recorded}"' in text
+    assert 'TEACHER_SUBJECT="${TEACHER_SUBJECT:-teacher}"' in text
+    assert "not a teacher baseline" in text
+
+
+def test_every_flag_inside_a_command_substitution_exists():
+    """The selectors inside `$( ... )` are what produce the ids the next stage consumes.
+
+    The dry run replaces them with a placeholder rather than echoing them, so the flag check above never sees
+    them -- which is how `eval latest --subject-tag` survived. This one reads the script text instead.
+    """
+    import re
+    import sys
+
+    from typer.main import get_command
+
+    from agentdistill.cli import app
+
+    root = get_command(app)
+    groups = {n: set(getattr(c, "commands", {})) for n, c in root.commands.items()}  # type: ignore[attr-defined]
+
+    missing, checked = [], 0
+    # `cap <label> <command...>`: the label is consumed by the dry-run placeholder, the rest is the command.
+    for m in re.finditer(r"\$\(cap\s+\S+\s+([^)]*)\)", SCRIPT.read_text()):
+        parts = [p for p in m.group(1).split() if not p.startswith(('"', "$", "}"))]
+        if not parts:
+            continue
+        head = parts[0]
+        cmd = parts[:2] if head in groups and len(parts) > 1 and parts[1] in groups[head] else parts[:1]
+        flags = {p for p in m.group(1).split() if p.startswith("--")}
+        checked += 1
+        help_text = re.sub(r"\s+", " ", subprocess.run(
+            [sys.executable, "-m", "agentdistill.cli", *cmd, "--help"],
+            capture_output=True, text=True, check=False,
+        ).stdout)
+        if not help_text:
+            missing.append(f"`{' '.join(cmd)}` is not a command")
+            continue
+        missing += [f"`{' '.join(cmd)}` has no {f}" for f in sorted(flags) if f not in help_text]
+
+    assert checked >= 8, f"expected several selectors, found {checked}"
+    assert not missing, "selectors inside $( ) use flags that do not exist:\n  " + "\n  ".join(sorted(set(missing)))

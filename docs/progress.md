@@ -10,15 +10,31 @@ What is built, what is measured, and every place the code deliberately differs f
 | M2 — SFT | **code complete, unmeasured.** No GPU run; no throughput or next-action number exists. |
 | M2.5 — example agent | **built and tested.** Corpus recorded from a scripted teacher, not a teacher. |
 | M3 — eval harness | **done.** Control test passes; `eval run` / `compare` / `show` work end to end. Judge grading is calibrated. |
-| M4 — on-policy | bridge built (`eval/rollouts.py`); the round loop and DPO trainer are not |
-| M5–M8 | not started; those commands exit 2 naming their milestone |
+| M4 — on-policy | round loop, DPO data, and `decide` built and tested. The GPU-bound round stages are not. |
+| M5 — cascade | **code complete, unmeasured.** Gate, calibration, threshold search, and verification all run; no real logprobs have been fitted on. |
+| M6 — gateway, router, serving | **done.** Both dialects verified against the real SDKs; router, canary split, and live comparison tested. |
+| M7 — retrain loop | **done.** Eight stages with gates; the workflow is committed as a draft until `serve_smoke.sh` passes on real hardware. |
+| M8 — cost model and report | **done.** HTML and markdown, idempotent injection, no number without a run id. |
+
+Remaining `_not_built` commands: `ingest otel`, and the DPO stage inside an on-policy round. Everything else
+runs.
 
 **The sentence this phase exists to produce is still not true.** It requires a student, and a student requires a
 GPU run this environment cannot do. What exists is every piece around it: the harness reproduces recordings
 exactly, the statistics are simulation-tested, and a paired comparison between two subjects prints a correct
 report with an interval. Point it at a trained adapter and the number appears.
 
-Adapters can only reach `candidate`. No cost or quality claim has been measured.
+Adapters can only reach `candidate`. No cost or quality claim has been measured. `README.md` and
+`docs/results.md` carry the report's injection markers with nothing between them, and a test keeps them empty.
+
+### What the CPU rehearsal covers, and what it does not
+
+`AGENTDISTILL_TINY=1 bash scripts/gpu_day.sh` runs every stage on a laptop against a randomly-initialized
+2-layer model. It has found eight real defects so far, listed in `docs/gpu-day.md`. It cannot cover vLLM
+itself — no real tool parser, no LoRA loading, no template handling — or anything CUDA. Those are what
+`scripts/serve_smoke.sh` on the real box is for.
+
+**Tiny-mode numbers measure nothing.** The model is random. The report carries a tiny-mode warning saying so.
 
 ## Divergences from the implementation plan
 
@@ -92,6 +108,49 @@ reconstruction. Fixed with a sha256 digest; the equivalence test now agrees 260/
 This is the bug `test_replay_predicate_matches_live` exists to catch, and it would have silently corrupted every
 eval number involving a tracking number.
 
+### The canary split hashes the request id (phase 3c §3.2)
+
+The plan specified `int(request_id[-2:], 16) % 100 < share * 100`. Two hex digits give 256 values and 256 does
+not divide by 100, so buckets 0–55 collect three source values each and 56–99 collect two: a 10% share takes
+11.7% of traffic, outside the plan's own 9–11% acceptance band. It is also sensitive to the shape of the id —
+request ids are often sequential or timestamped, and their last byte then correlates with arrival time.
+
+**Resolution:** hash first. `test_canary_split.py` pins the old behaviour so the reason stays on record.
+
+### A decay that would disable the router's floor is refused (phase 3c §3.1)
+
+Each update multiplies `alpha + beta` by `decay` and adds one, so evidence converges to `1/(1-decay)` however
+much traffic flows. At `decay: 0.9` the ceiling is 8 observations, below the default floor threshold of 10 — the
+floor could never engage, and the router would keep sending traffic to a student it had already watched fail.
+Refused at config load, where the fix is cheap, rather than at gateway boot, where the only safe response is to
+serve without a router.
+
+### Two retrain gates are stricter than the plan (phase 3c §3.4)
+
+The eval gate reads the CI low end rather than the point estimate: a candidate 0.5 pp below prod with an
+eight-point interval has not been shown at parity, it has been measured badly. Calibration requires AUROC as
+well as ECE, because ECE alone passes a calibrator that outputs the base rate for every turn — perfectly
+calibrated, and useless.
+
+### The merge tolerance reports its own granularity (phase 3c §4.1)
+
+The plan asked for 50 held-out turns against a 2 pp tolerance. One disagreeing turn out of 50 is 2 pp, so at
+that size the gate passes only an exact reproduction. That is a defensible bar but not what "within 2 points"
+sounds like, so the verification result says which one applies and how many turns the tolerance would need.
+
+### Tiny mode uses ten-task eval sets, not five (phase 3c §5)
+
+`eval compare` refuses below eight tasks, because a task-clustered interval over five means nothing. At the
+plan's five, the rehearsal would silently skip the comparison stage — one of the stages most worth rehearsing.
+
+### `eval run teacher` was evaluating the base model
+
+Not a plan divergence but the most consequential bug this phase found. `_resolve_client` excluded `teacher`
+from the adapter lookup and then fell through to the local-model branch, loading `train.base_model` and
+labelling the run "teacher". Every student-against-teacher comparison would have been a student-against-base
+comparison, and it would have been believed. `teacher` now resolves to a LiteLLM client on `teacher.model` and
+refuses when none is configured.
+
 ## Blocked on hardware or credentials
 
 | Item | Blocker |
@@ -100,6 +159,9 @@ eval number involving a tracking number.
 | vLLM parser path, `VllmOfflineTurnClient` | vLLM does not install on macOS ARM. Import-guarded and skipped, not stubbed. |
 | Recording real teacher traces (next-phase §3) | Needs a teacher endpoint. The agent, CRM, scenarios, and graders are built and tested; `record.py --model <id>` needs only credentials. |
 | The M3 definition of done (`base` vs adapter vs teacher on one GPU) | Needs a trained adapter. The harness, graders, statistics, and report are done and tested; the missing input is a student. |
+| A fitted confidence gate | Needs real per-turn logprobs from a model that can do the task. `eval run --logprobs --samples` and `calibrate` run end to end on CPU, but a random model produces a single outcome class and the gate correctly refuses to fit. |
+| `adapter quantize --method awq` | Needs `llmcompressor` and a GPU. `fp8` writes its marker and runs anywhere. |
+| Renaming `.github/workflows/retrain.yml.draft` | Gated on `serve_smoke.sh` passing on the self-hosted runner. Scheduling an unverified pipeline to train and promote models weekly is the wrong order. |
 
 ## Where the example corpus falls short of the plan
 

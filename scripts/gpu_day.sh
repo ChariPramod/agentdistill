@@ -22,6 +22,11 @@ if [[ "${AGENTDISTILL_TINY:-0}" == "1" ]]; then
   UNSEEN_SET="${UNSEEN_SET:-support-unseen-tiny}"
   CALIB_SET="${CALIB_SET:-support-calib-tiny}"
   N_EVAL="${N_EVAL:-1}"
+  # `recorded` replays the teacher's own recorded turns, which is the honest stand-in for the teacher on a
+  # laptop: it is free, needs no key, and is literally what the teacher did. It is not a teacher baseline --
+  # a replay cannot fail in a way the recording did not -- so it rehearses the stage without pretending to
+  # measure anything.
+  TEACHER_SUBJECT="${TEACHER_SUBJECT:-recorded}"
   echo "== tiny mode: CPU rehearsal, the numbers are not meaningful"
   # Idempotent: builds the tiny model and the ten-task eval sets if they are not already there. Skipped in a
   # dry run, which is meant to print a plan without touching anything.
@@ -40,6 +45,7 @@ EVAL_SET="${EVAL_SET:-support-holdout-v1}"
 UNSEEN_SET="${UNSEEN_SET:-support-unseen-v1}"
 CALIB_SET="${CALIB_SET:-support-calib-v1}"
 N_EVAL="${N_EVAL:-5}"
+TEACHER_SUBJECT="${TEACHER_SUBJECT:-teacher}"
 BACKEND="${AGENTDISTILL_EVAL_BACKEND:-vllm}"
 TINY="${AGENTDISTILL_TINY:-0}"
 
@@ -119,8 +125,8 @@ s_merge()       { ad adapter merge "$(cap adapter adapter latest --tag "$TAG" "$
 
 s_eval_base()   { ad eval run base --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --tag "$TAG" "${CONFIG_ARG[@]}"; }
 s_eval_sft()    { ad eval run "$(cap adapter adapter latest --tag "$TAG" "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --tag "$TAG" "${CONFIG_ARG[@]}"; }
-s_eval_teach()  { ad eval run teacher --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --tag "$TAG" "${CONFIG_ARG[@]}"; }
-s_cmp_sft()     { ad eval compare "$(cap ev eval latest --subject-tag "$TAG" "${CONFIG_ARG[@]}")" "$(cap ev eval latest --subject base "${CONFIG_ARG[@]}")" --out "$MARKERS/cmp_sft.md" "${CONFIG_ARG[@]}"; }
+s_eval_teach()  { ad eval run "$TEACHER_SUBJECT" --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --tag "$TAG" "${CONFIG_ARG[@]}"; }
+s_cmp_sft()     { ad eval compare "$(cap ev eval latest --tag "$TAG" "${CONFIG_ARG[@]}")" "$(cap ev eval latest --subject base "${CONFIG_ARG[@]}")" --out "$MARKERS/cmp_sft.md" "${CONFIG_ARG[@]}"; }
 
 s_onpolicy()    { ad train onpolicy "$(cap adapter adapter latest --tag "$TAG" "${CONFIG_ARG[@]}")" --rounds 1 --backend "$BACKEND" --tag "$TAG-r1" "${CONFIG_ARG[@]}"; }
 s_eval_r1()     { ad eval run "$(cap adapter adapter latest --tag "$TAG-r1" "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --tag "$TAG-r1" "${CONFIG_ARG[@]}"; }
