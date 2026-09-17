@@ -326,3 +326,108 @@ def test_replay_grader_rejects_a_trace_without_scenario_metadata():
 
     with pytest.raises(UngradeableTrace, match="db_seed"):
         task_for_trace({"id": "x", "metadata": {}})
+
+
+# --------------------------------------------------------------------------------------------------------------
+# what `teacher` resolves to
+#
+# It used to fall through to the local-model branch and evaluate `train.base_model` under the label "teacher",
+# which turns the single most important comparison in the report -- student against teacher -- into a comparison
+# of the student against the base model. A wrong baseline is worse than a missing one.
+# --------------------------------------------------------------------------------------------------------------
+
+
+def _project(tmp_path, teacher: dict | None) -> str:
+    import yaml
+
+    body = {
+        "name": "t",
+        "registry": f"sqlite:///{tmp_path}/registry.db",
+        "artifacts": str(tmp_path / "artifacts"),
+        "reports": str(tmp_path / "reports"),
+        "train": {"base_model": "some/base-model", "max_seq_len": 512},
+        "dataset": {"max_seq_len": 512},
+    }
+    if teacher:
+        body["teacher"] = teacher
+    path = tmp_path / "project.yaml"
+    path.write_text(yaml.safe_dump(body))
+    return str(path)
+
+
+def test_the_teacher_subject_calls_the_teacher_not_the_base_model(tmp_path):
+    from agentdistill.cli import _resolve_client
+    from agentdistill.config import ProjectConfig
+    from agentdistill.eval.clients import LiteLLMTurnClient
+
+    cfg = ProjectConfig.load(_project(tmp_path, {"model": "anthropic/claude-sonnet-5"}))
+    client = _resolve_client("teacher", cfg, backend="hf")
+
+    assert isinstance(client, LiteLLMTurnClient)
+    assert client.model == "anthropic/claude-sonnet-5"
+    assert client.model != cfg.base_model
+
+
+def test_no_teacher_configured_refuses_rather_than_substituting_the_base_model(tmp_path):
+    import typer
+
+    from agentdistill.cli import _resolve_client
+    from agentdistill.config import ProjectConfig
+
+    cfg = ProjectConfig.load(_project(tmp_path, None))
+    with pytest.raises(typer.Exit):
+        _resolve_client("teacher", cfg, backend="hf")
+
+
+def test_the_teacher_client_sends_tools_and_reads_a_tool_call_back():
+    from agentdistill.eval.clients import LiteLLMTurnClient
+
+    seen = {}
+
+    class Fn:
+        name, arguments = "search_orders", '{"q": "A1"}'
+
+    class Call:
+        id, function = "c1", Fn()
+
+    class Message:
+        content, tool_calls = None, [Call()]
+
+    class Choice:
+        message, logprobs = Message(), None
+
+    class Response:
+        choices = [Choice()]
+
+    def fake_completion(**kwargs):
+        seen.update(kwargs)
+        return Response()
+
+    client = LiteLLMTurnClient("anthropic/claude-sonnet-5", completion=fake_completion)
+    tools = [{"type": "function", "function": {"name": "search_orders", "parameters": {}}}]
+    turn = client.next_turn([{"role": "user", "content": "where is A1"}], tools)
+
+    assert seen["model"] == "anthropic/claude-sonnet-5"
+    assert seen["tools"] == tools
+    # Greedy, like every other eval client, so a teacher baseline is reproducible.
+    assert seen["temperature"] == 0.0
+    assert turn["tool_calls"][0]["function"]["name"] == "search_orders"
+
+
+def test_a_teacher_that_reports_no_logprobs_is_still_a_valid_baseline():
+    """Not every provider supports them; asking and tolerating their absence beats failing the run."""
+    from agentdistill.eval.clients import LiteLLMTurnClient
+
+    class Message:
+        content, tool_calls = "done", None
+
+    class Choice:
+        message, logprobs = Message(), None
+
+    class Response:
+        choices = [Choice()]
+
+    client = LiteLLMTurnClient("x/y", logprobs=True, completion=lambda **kw: Response())
+    turn = client.next_turn([{"role": "user", "content": "hi"}], [])
+    assert turn["content"] == "done"
+    assert "logprobs" not in turn

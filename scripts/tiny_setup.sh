@@ -48,4 +48,11 @@ for s in holdout unseen calib; do
     || echo "  support-$s-tiny already registered"
 done
 
+echo "==> curate"
+if "$AD" dataset latest --kind sft --config "$CFG" >/dev/null 2>&1; then
+  echo "  dataset already built"
+else
+  "$AD" curate --config "$CFG" >/dev/null
+fi
+
 echo "tiny setup ok — the numbers this produces mean nothing; the execution path is real"

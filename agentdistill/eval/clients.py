@@ -340,6 +340,92 @@ class HttpTurnClient:
         }
 
 
+class LiteLLMTurnClient:
+    """The configured teacher, through LiteLLM.
+
+    One `teacher.model` string works for any provider, and it is the same path
+    `examples/support_agent/record.py` uses to record the traces in the first place. Evaluating the teacher
+    through a different client than recorded it would be measuring the client.
+
+    Greedy by default, like every other eval client, so a teacher baseline is reproducible.
+    """
+
+    def __init__(
+        self,
+        model: str,
+        logprobs: bool = False,
+        temperature: float = 0.0,
+        max_tokens: int | None = None,
+        completion: Any = None,
+    ) -> None:
+        self.model, self.logprobs = model, logprobs
+        self.temperature, self.max_tokens = temperature, max_tokens
+        self._completion = completion
+
+    @property
+    def completion(self) -> Any:
+        if self._completion is None:
+            import litellm
+
+            self._completion = litellm.completion
+        return self._completion
+
+    def next_turn(self, messages: list[dict], tools: list[dict]) -> dict:
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+        }
+        if tools:
+            kwargs["tools"] = tools
+        if self.max_tokens:
+            kwargs["max_tokens"] = self.max_tokens
+        if self.logprobs:
+            # Not every provider supports logprobs; a teacher that cannot report them is still a valid
+            # baseline, so this asks and tolerates their absence rather than failing the run.
+            kwargs.update(logprobs=True, top_logprobs=5)
+
+        response = self.completion(**kwargs)
+        choice = response.choices[0]
+        message = choice.message
+        calls = [
+            {
+                "id": c.id,
+                "type": "function",
+                "function": {"name": c.function.name, "arguments": c.function.arguments},
+            }
+            for c in (getattr(message, "tool_calls", None) or [])
+        ]
+        turn: dict[str, Any] = {
+            "role": "assistant",
+            "content": getattr(message, "content", None),
+            "tool_calls": calls or None,
+        }
+        content = _litellm_logprobs(choice)
+        if content:
+            turn["logprobs"] = {"content": content}
+        return turn
+
+
+def _litellm_logprobs(choice: Any) -> list[dict]:
+    """Per-token logprobs when the provider returned any, in the OpenAI shape the features read."""
+    raw = getattr(choice, "logprobs", None)
+    tokens = getattr(raw, "content", None) if raw is not None else None
+    if not tokens:
+        return []
+    out = []
+    for t in tokens:
+        out.append({
+            "token": getattr(t, "token", ""),
+            "logprob": float(getattr(t, "logprob", float("nan"))),
+            "top_logprobs": [
+                {"token": getattr(x, "token", ""), "logprob": float(getattr(x, "logprob", float("nan")))}
+                for x in (getattr(t, "top_logprobs", None) or [])
+            ],
+        })
+    return out
+
+
 def strip_private(message: dict) -> dict:
     """Remove transport-only keys before a turn joins a trajectory."""
     return {k: v for k, v in message.items() if not k.startswith("_")}

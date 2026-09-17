@@ -27,6 +27,7 @@ pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="bash not a
 def dry_run(tmp_path: Path, tiny: bool) -> str:
     env = {
         "AGENTDISTILL_DRY_RUN": "1",
+        "AGENTDISTILL_MARKER_DIR": str(tmp_path / "markers"),
         "PATH": "/usr/bin:/bin:/usr/local/bin",
         "HOME": str(tmp_path),
     }
@@ -39,15 +40,7 @@ def dry_run(tmp_path: Path, tiny: bool) -> str:
     return proc.stdout
 
 
-@pytest.fixture(autouse=True)
-def _clean_markers():
-    for d in (ROOT / "artifacts" / "gpu_day",):
-        if d.exists():
-            shutil.rmtree(d)
-    yield
-    for d in (ROOT / "artifacts" / "gpu_day",):
-        if d.exists():
-            shutil.rmtree(d)
+# No cleanup fixture: markers go under each test's own tmp_path, so the repo's artifacts/ is never touched.
 
 
 def test_the_tiny_config_loads():
@@ -90,9 +83,8 @@ def test_tiny_runs_every_stage_the_real_day_runs(tmp_path):
     def stages(out: str) -> list[str]:
         return [line.split()[1] for line in out.splitlines() if line.startswith("== ") and "skip" not in line]
 
-    real = stages(dry_run(tmp_path, tiny=False))
-    shutil.rmtree(ROOT / "artifacts" / "gpu_day", ignore_errors=True)
-    tiny = [s for s in stages(dry_run(tmp_path, tiny=True)) if s != "tiny"]
+    real = stages(dry_run(tmp_path / "real", tiny=False))
+    tiny = [s for s in stages(dry_run(tmp_path / "tiny", tiny=True)) if s != "tiny"]
     assert len(real) >= 18, f"the comparison is vacuous; only found {real}"
     assert tiny == real
 

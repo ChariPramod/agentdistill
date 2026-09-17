@@ -1,0 +1,47 @@
+# Version pins for the GPU box.
+#
+# The box installs from this file, not from the ranges in pyproject.toml. Ranges are right for a library and
+# wrong for a rented machine: a transformers release between the rehearsal and the day turns an eight-hour
+# session into a debugging session. `agentdistill train` already carries a compatibility shim for one such
+# break (transformers 5.x removed `warmup_ratio`); the point of pinning is not to need a second one.
+#
+#   pip install -r requirements-gpu.txt -e ".[train,serve]"
+#
+# Regenerate after a green tiny rehearsal:
+#   uv pip freeze | grep -iE '^(torch|transformers|trl|peft|accelerate|datasets|tokenizers|safetensors|numpy|scikit-learn|scipy)=='
+#
+# ---------------------------------------------------------------------------------------------------------
+# Rehearsed on CPU. These exact versions ran the full tiny rehearsal.
+# ---------------------------------------------------------------------------------------------------------
+accelerate==1.15.0
+datasets==5.0.1
+numpy==2.5.3
+peft==0.21.0
+safetensors==0.8.0
+scikit-learn==1.9.1
+scipy==1.18.1
+tokenizers==0.23.2
+transformers==5.17.0
+trl==1.13.0
+
+# ---------------------------------------------------------------------------------------------------------
+# NOT rehearsed. The laptop has no CUDA, so these are unverified here and must be pinned on the box after the
+# first successful install -- before anything is trained, so a rerun reproduces it.
+# ---------------------------------------------------------------------------------------------------------
+# torch must match the box's CUDA. The CPU build below is what was rehearsed; on the GPU install the matching
+# CUDA wheel first (e.g. --index-url https://download.pytorch.org/whl/cu124) and then pin what you got.
+torch==2.14.0
+
+# vllm pulls its own torch and will silently replace one installed above. Install it FIRST on the box, let it
+# choose torch, then pin the torch it chose. Installing in the other order is how a GPU day starts with a
+# forty-minute reinstall.
+# vllm==<pin after install>
+
+# Only needed for `adapter quantize --method awq`. fp8 is applied online by vLLM and needs nothing here.
+# llmcompressor==<pin after install>
+
+# ---------------------------------------------------------------------------------------------------------
+# flash-attn is optional and builds from source, which takes 20+ minutes. `attn_implementation` falls back to
+# sdpa when it is absent, so skip it unless the throughput matters more than the time.
+# ---------------------------------------------------------------------------------------------------------
+# flash-attn==<pin after install>

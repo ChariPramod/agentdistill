@@ -109,7 +109,9 @@ def quantize_awq(merged_dir: str, out_dir: str, calib_prompts: list[str]) -> dic
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(merged_dir)
-    model = AutoModelForCausalLM.from_pretrained(merged_dir, torch_dtype="auto", device_map="auto")
+    # `dtype`, not `torch_dtype`: transformers 5.x deprecated the old name. `device_map="auto"` stays here --
+    # unlike a merge, an AWQ pass runs forward passes over calibration data and wants the accelerator.
+    model = AutoModelForCausalLM.from_pretrained(merged_dir, dtype="auto", device_map="auto")
     dataset = [{"text": p} for p in calib_prompts]
 
     oneshot(

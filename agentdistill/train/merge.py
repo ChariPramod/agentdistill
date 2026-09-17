@@ -28,30 +28,42 @@ class MergeVerificationFailed(RuntimeError):
     """The merged weights do not reproduce the adapter's behaviour."""
 
 
-def merge_adapter(base_model: str, adapter_path: str, out_dir: str, dtype: str = "bfloat16") -> dict:
+def merge_adapter(
+    base_model: str, adapter_path: str, out_dir: str, dtype: str = "bfloat16", device_map: str | None = None
+) -> dict:
     """Merge `adapter_path` into `base_model` and write the result to `out_dir`.
 
     Always into bf16, never into a quantized base. Merging into 4-bit weights means dequantizing, adding the
     LoRA delta, and requantizing, and the round trip loses more than the adapter contributed. That failure is
     silent: the model loads, generates fluent text, and is worse.
+
+    `device_map` defaults to `auto` on CUDA and to CPU everywhere else. A merge is arithmetic on weights, not
+    generation: it does not need an accelerator, and `auto` on a machine with MPS or a partial accelerate setup
+    segfaults rather than falling back. The rehearsal died here.
     """
     import torch
     from peft import PeftModel
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    torch_dtype = getattr(torch, dtype)
-    if torch_dtype not in (torch.bfloat16, torch.float16, torch.float32):
+    resolved_dtype = getattr(torch, dtype, None)
+    if resolved_dtype not in (torch.bfloat16, torch.float16, torch.float32):
         raise ValueError(f"refusing to merge into {dtype}; merge into a float dtype and quantize afterwards")
 
+    if device_map is None:
+        device_map = "auto" if torch.cuda.is_available() else "cpu"
+
     tokenizer = AutoTokenizer.from_pretrained(base_model)
-    model = AutoModelForCausalLM.from_pretrained(base_model, torch_dtype=torch_dtype, device_map="auto")
+    # `dtype`, not `torch_dtype`: transformers 5.x deprecated the old name.
+    model = AutoModelForCausalLM.from_pretrained(base_model, dtype=resolved_dtype, device_map=device_map)
     merged = PeftModel.from_pretrained(model, adapter_path).merge_and_unload()
 
     os.makedirs(out_dir, exist_ok=True)
     merged.save_pretrained(out_dir, safe_serialization=True)
     tokenizer.save_pretrained(out_dir)
-    write_marker(out_dir, {"base_model": base_model, "adapter_path": adapter_path, "dtype": dtype})
-    return {"out_dir": out_dir, "dtype": dtype, "base_model": base_model, "adapter_path": adapter_path}
+    write_marker(out_dir, {"base_model": base_model, "adapter_path": adapter_path, "dtype": dtype,
+                           "device_map": device_map})
+    return {"out_dir": out_dir, "dtype": dtype, "base_model": base_model, "adapter_path": adapter_path,
+            "device_map": device_map}
 
 
 def write_marker(out_dir: str, payload: dict) -> Path:

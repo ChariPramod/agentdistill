@@ -43,7 +43,10 @@ N_EVAL="${N_EVAL:-5}"
 BACKEND="${AGENTDISTILL_EVAL_BACKEND:-vllm}"
 TINY="${AGENTDISTILL_TINY:-0}"
 
-mkdir -p artifacts/gpu_day logs
+# Overridable so the test suite can exercise the script without deleting a real session's markers. A test that
+# removes artifacts/gpu_day while a GPU day is running would make the next stage redo work that was paid for.
+MARKERS="${AGENTDISTILL_MARKER_DIR:-artifacts/gpu_day}"
+mkdir -p "$MARKERS" logs
 
 # In a dry run every agentdistill call is echoed instead of executed, which is what the syntax test exercises.
 ad() { if [[ "$DRY" == "1" ]]; then echo "agentdistill $*"; else agentdistill "$@"; fi; }
@@ -51,28 +54,49 @@ cap() { if [[ "$DRY" == "1" ]]; then echo "<$1>"; else shift; agentdistill "$@";
 
 stage() {
   local name="$1"; shift
-  if [[ -f "artifacts/gpu_day/$name.done" ]]; then echo "== skip $name (done)"; return 0; fi
+  if [[ -f "$MARKERS/$name.done" ]]; then echo "== skip $name (done)"; return 0; fi
   echo "== $name  $(date -u +%H:%M:%S)"
   if [[ "$DRY" == "1" ]]; then "$@"; else "$@" 2>&1 | tee "logs/gpu_day.$name.log"; fi
-  touch "artifacts/gpu_day/$name.done"
+  touch "$MARKERS/$name.done"
 }
 
 BASE_MODEL="$(cap base_model config get train.base_model "${CONFIG_ARG[@]}")"
 QUANT="$(cap quantization config get serve.quantization "${CONFIG_ARG[@]}")"
 
+# Install through whichever tool manages this environment. A uv-created venv has no `pip` in it at all, which
+# is how the first rehearsal died on its first stage.
+install() {
+  if command -v uv >/dev/null 2>&1; then
+    uv pip install "$@"
+  elif python -m pip --version >/dev/null 2>&1; then
+    python -m pip install "$@"
+  elif command -v pip >/dev/null 2>&1; then
+    pip install "$@"
+  else
+    echo "no uv and no pip in this environment; install one before running the day" >&2
+    return 1
+  fi
+}
+
+# Version pins, so the box installs what was rehearsed rather than whatever released this morning.
+requirements_arg() {
+  if [[ -f requirements-gpu.txt ]]; then echo "-r requirements-gpu.txt"; fi
+}
+
 s_env() {
   if [[ "$DRY" == "1" ]]; then
-    echo 'pip install -e ".[train,serve]" && python -c "check torch/vllm/trl/peft"'
+    echo 'install -e ".[train,serve]" && python -c "check torch/vllm/trl/peft"'
     return 0
   fi
   if [[ "$TINY" == "1" ]]; then
     # No vLLM and no CUDA on a laptop, and asking for them would fail the rehearsal on the one thing it is not
-    # rehearsing.
-    pip install -e ".[train]"
+    # rehearsing. The environment is assumed already installed here; a rehearsal that reinstalled the
+    # development venv on every run would be a worse experience than the failure it is protecting against.
     python -c 'import torch, trl, peft; print("torch", torch.__version__, "trl/peft ok (tiny mode)")'
     return 0
   fi
-  pip install -e ".[train,serve]"
+  # shellcheck disable=SC2046
+  install $(requirements_arg) -e ".[train,serve]"
   python - <<'PY'
 import torch
 print("torch", torch.__version__, "cuda", torch.cuda.is_available())
@@ -89,16 +113,16 @@ PY
 
 s_base_check()  { ad base-check "$BASE_MODEL" "${CONFIG_ARG[@]}"; }
 s_sft()         { ad train sft "$(cap dataset dataset latest --kind sft "${CONFIG_ARG[@]}")" --tag "$TAG" "${CONFIG_ARG[@]}"; }
-s_merge()       { ad adapter merge "$(cap adapter adapter latest --tag "$TAG" "${CONFIG_ARG[@]}")" "${CONFIG_ARG[@]}"; }
+s_merge()       { ad adapter merge "$(cap adapter adapter latest --tag "$TAG" "${CONFIG_ARG[@]}")" --backend "$BACKEND" "${CONFIG_ARG[@]}"; }
 # fp8 writes a marker and nothing else, so quantize runs unchanged on a laptop. AWQ does not, and tiny mode
 # configures fp8 rather than skipping the stage -- a skipped stage rehearses nothing.
 
 s_eval_base()   { ad eval run base --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --tag "$TAG" "${CONFIG_ARG[@]}"; }
 s_eval_sft()    { ad eval run "$(cap adapter adapter latest --tag "$TAG" "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --tag "$TAG" "${CONFIG_ARG[@]}"; }
 s_eval_teach()  { ad eval run teacher --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --tag "$TAG" "${CONFIG_ARG[@]}"; }
-s_cmp_sft()     { ad eval compare "$(cap ev eval latest --subject-tag "$TAG" "${CONFIG_ARG[@]}")" "$(cap ev eval latest --subject base "${CONFIG_ARG[@]}")" --out artifacts/gpu_day/cmp_sft.md "${CONFIG_ARG[@]}"; }
+s_cmp_sft()     { ad eval compare "$(cap ev eval latest --subject-tag "$TAG" "${CONFIG_ARG[@]}")" "$(cap ev eval latest --subject base "${CONFIG_ARG[@]}")" --out "$MARKERS/cmp_sft.md" "${CONFIG_ARG[@]}"; }
 
-s_onpolicy()    { ad train onpolicy "$(cap adapter adapter latest --tag "$TAG" "${CONFIG_ARG[@]}")" --rounds 1 --tag "$TAG-r1" "${CONFIG_ARG[@]}"; }
+s_onpolicy()    { ad train onpolicy "$(cap adapter adapter latest --tag "$TAG" "${CONFIG_ARG[@]}")" --rounds 1 --backend "$BACKEND" --tag "$TAG-r1" "${CONFIG_ARG[@]}"; }
 s_eval_r1()     { ad eval run "$(cap adapter adapter latest --tag "$TAG-r1" "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --tag "$TAG-r1" "${CONFIG_ARG[@]}"; }
 s_unseen()      { ad eval run "$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}")" --eval-set "$UNSEEN_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --tag "$TAG" "${CONFIG_ARG[@]}"; }
 
@@ -119,7 +143,7 @@ s_serve_smoke() {
   fi
   bash scripts/serve_smoke.sh
 }
-s_report()      { ad report --out artifacts/gpu_day/report.html --include-run-ids "${CONFIG_ARG[@]}"; }
+s_report()      { ad report --out "$MARKERS/report.html" --include-run-ids "${CONFIG_ARG[@]}"; }
 
 stage env          s_env
 stage base_check   s_base_check
@@ -141,4 +165,4 @@ stage serve_smoke  s_serve_smoke
 stage report       s_report
 
 echo "== done  $(date -u +%H:%M:%S)"
-ls -la artifacts/gpu_day
+ls -la "$MARKERS"

@@ -237,3 +237,109 @@ def test_tokenizer_only_base_model_gives_an_actionable_error(tiny_dataset, tmp_p
            "lora": {"r": 4, "alpha": 8, "dropout": 0.0, "target_modules": ["q_proj"]}, "report_to": []}
     with pytest.raises(NoSuchBaseModel, match="base-check"):
         train_sft(cfg, tiny_dataset, tmp_path / "adapter")
+
+
+def test_the_tag_reaches_the_adapter_row(tiny_model_dir, tmp_path, monkeypatch):
+    """`train sft --tag` has to persist, or every selector after it finds nothing.
+
+    The GPU day script chains its stages with `adapter latest --tag "$TAG"`. A tag that is accepted and then
+    dropped breaks the chain at the very next stage -- which is exactly where the CPU rehearsal found it, and
+    where the GPU day would have found it instead.
+    """
+    import json
+
+    import yaml
+    from typer.testing import CliRunner
+
+    from agentdistill.cli import app
+    from agentdistill.registry import open_registry
+    from agentdistill.registry.select import latest_adapter
+    from tests.conftest import make_trace
+
+    monkeypatch.chdir(tmp_path)
+    traces = [
+        make_trace(f"t{i}", task=f"Where is order {i} for my account, it has been a while now",
+                   closing=" ".join(f"Point {j} of case {i} is confirmed as {i * 11 + j}" for j in range(5)))
+        for i in range(8)
+    ]
+    (tmp_path / "traces.jsonl").write_text("\n".join(json.dumps(t) for t in traces) + "\n")
+    (tmp_path / "project.yaml").write_text(yaml.safe_dump({
+        "name": "demo",
+        "registry": "sqlite:///.agentdistill/registry.db",
+        "artifacts": "./artifacts",
+        "reports": "./reports",
+        "dataset": {"max_seq_len": 512},
+        "curate": {"clusters": 2, "cap_per_cluster": 50},
+        "train": {
+            "base_model": str(tiny_model_dir), "max_seq_len": 512, "quantization": None, "packing": False,
+            "lora": {"r": 4, "alpha": 8, "dropout": 0.0, "target_modules": ["q_proj", "v_proj"]},
+            "epochs": 1, "per_device_batch": 1, "grad_accum": 1,
+        },
+    }))
+
+    runner = CliRunner()
+    assert runner.invoke(app, ["ingest", "jsonl", "traces.jsonl"]).exit_code == 0
+    assert runner.invoke(app, ["curate"]).exit_code == 0
+
+    result = runner.invoke(app, ["train", "sft", "demo", "--max-steps", "1", "--tag", "gpu-day"])
+    assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
+
+    reg = open_registry("sqlite:///.agentdistill/registry.db", root=tmp_path)
+    try:
+        rows = reg.list_adapters()
+        assert rows and rows[-1]["tag"] == "gpu-day"
+        # And the selector the script actually uses finds it.
+        assert latest_adapter(reg, tag="gpu-day")["id"] == rows[-1]["id"]
+    finally:
+        reg.close()
+
+
+def test_a_dataset_can_be_selected_by_id_as_well_as_name(tmp_path, monkeypatch):
+    """`dataset latest` prints an id and `train sft` took only a name, so the script's own chaining failed.
+
+    Both work now, because the selectors print ids while a person types a name, and needing different commands
+    for the script and the human means the script's version is the one nobody runs until the GPU day.
+    """
+    import json
+
+    import yaml
+    from typer.testing import CliRunner
+
+    from agentdistill.cli import app
+    from agentdistill.registry import open_registry
+    from tests.conftest import make_trace
+
+    monkeypatch.chdir(tmp_path)
+    traces = [
+        make_trace(f"t{i}", task=f"Order {i} has not arrived and I would like an update please",
+                   closing=" ".join(f"Point {j} of case {i} is confirmed as {i * 11 + j}" for j in range(5)))
+        for i in range(8)
+    ]
+    (tmp_path / "traces.jsonl").write_text("\n".join(json.dumps(t) for t in traces) + "\n")
+    (tmp_path / "project.yaml").write_text(yaml.safe_dump({
+        "name": "demo",
+        "registry": "sqlite:///.agentdistill/registry.db",
+        "artifacts": "./artifacts",
+        "reports": "./reports",
+        "dataset": {"max_seq_len": 512},
+        "curate": {"clusters": 2, "cap_per_cluster": 50},
+        "train": {"base_model": str(TOKENIZER_DIR), "max_seq_len": 512},
+    }))
+
+    runner = CliRunner()
+    assert runner.invoke(app, ["ingest", "jsonl", "traces.jsonl"]).exit_code == 0
+    curated = runner.invoke(app, ["curate"])
+    assert curated.exit_code == 0, (curated.stdout or "") + (curated.stderr or "")
+
+    reg = open_registry("sqlite:///.agentdistill/registry.db", root=tmp_path)
+    try:
+        by_name = reg.get_dataset("demo")
+        assert by_name is not None
+        by_id = reg.get_dataset(by_name["id"])
+        assert by_id is not None and by_id["id"] == by_name["id"]
+
+        # What `dataset latest` prints is what the next stage is handed.
+        printed = runner.invoke(app, ["dataset", "latest", "--kind", "sft"]).stdout.strip()
+        assert reg.get_dataset(printed) is not None, f"`dataset latest` printed {printed!r}, unresolvable"
+    finally:
+        reg.close()

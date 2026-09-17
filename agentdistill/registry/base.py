@@ -339,7 +339,13 @@ class Registry:
             )
 
     def get_dataset(self, name: str, version: int | None = None) -> dict | None:
-        q = "SELECT * FROM datasets WHERE name = :n"
+        """Look a dataset up by name (latest version, or a given one) or by id.
+
+        Both, because the selectors print ids -- `dataset latest` is what the GPU script feeds straight into
+        `train sft` -- while a person types a name. Accepting only one of the two means the script and the
+        human need different commands, and the script's version is the one nobody runs until the GPU day.
+        """
+        q = "SELECT * FROM datasets WHERE name = :n OR id = :n"
         params: dict[str, Any] = {"n": name}
         if version is not None:
             q += " AND version = :v"

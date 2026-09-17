@@ -264,7 +264,7 @@ def _build_dataset(cfg, reg, result, ds_name, version, kind, base_model):
     from agentdistill.data.dataset import build_dataset
     from agentdistill.data.template_check import TemplateError
 
-    model = base_model or (cfg.train.base_model if cfg.train else None)
+    model = base_model or (cfg.base_model if cfg else None)
     if not model:
         err.print("[yellow]no train.base_model set, so no dataset was tokenized.[/yellow]")
         err.print("Set train.base_model in project.yaml or pass --base-model, then re-run.")
@@ -530,6 +530,15 @@ def config_cmd(
         err.print("[red]only `config get <key>` is supported[/red]")
         raise typer.Exit(code=1)
     cfg = _load(config)
+    if key == "train.base_model":
+        # The shell scripts run from the repo root while the config lives beside the example, so a relative
+        # base_model has to come out resolved or every consumer of this value breaks.
+        if cfg.base_model is None:
+            err.print(f"[red]no config value at {key!r}[/red]")
+            raise typer.Exit(code=1)
+        print(cfg.base_model)
+        return
+
     node: Any = cfg
     for part in key.split("."):
         node = getattr(node, part, None) if not isinstance(node, dict) else node.get(part)
@@ -672,6 +681,9 @@ def train_sft_cmd(
         raise typer.Exit(code=1) from e
 
     train_cfg = cfg.train.model_dump()
+    # Resolved against the config's own directory, so `train sft` works from the repo root as well as from
+    # beside the config.
+    train_cfg["base_model"] = cfg.base_model
     if max_steps is not None:
         train_cfg["max_steps"] = max_steps
     if epochs is not None:
@@ -729,7 +741,7 @@ def train_sft_cmd(
         reg.insert_adapter({
             "id": f"ad_{uuid.uuid4().hex[:16]}", "training_run_id": run_id, "name": adapter_name,
             "version": version, "base_model": train_cfg["base_model"], "path": str(out_dir),
-            "parent_adapter_id": parent_id,
+            "parent_adapter_id": parent_id, "tag": tag,
         })
 
     loss = f"{result.eval_loss:.4f}" if result.eval_loss is not None else "n/a"
@@ -762,6 +774,7 @@ def train_onpolicy(
     rounds: int = typer.Option(1, help="How many rounds to attempt. A discarded round stops the loop."),
     tag: str | None = typer.Option(None, help="Groups this session's artifacts for the selectors."),
     k: int | None = typer.Option(None, "--k", help="Rollouts per task."),
+    backend: str = typer.Option("hf", help="Inference backend for rollouts and merge verification."),
     dry_run: bool = typer.Option(False, help="Print the stage plan and stop."),
     config: str = typer.Option("project.yaml"),
 ) -> None:
@@ -800,7 +813,7 @@ def train_onpolicy(
         __import__("agentdistill.registry.select", fromlist=["latest_eval"]).latest_eval,
         registry=reg, subject=adapter, eval_set=cfg.eval.eval_set,
     )
-    stages = _onpolicy_stages(cfg, reg, tag, round_cfg)
+    stages = _onpolicy_stages(cfg, reg, tag, round_cfg, backend)
     teacher_by_task = {t.get("task_id") or t["id"]: t for t in train_traces}
 
     results = run_rounds(adapter, rounds, task_ids, teacher_by_task, current_eval["id"], stages, round_cfg)
@@ -829,8 +842,12 @@ def _print_round(r) -> None:
     console.print(f"  [{style}]{r.decision}[/{style}]: {r.reason}")
 
 
-def _onpolicy_stages(cfg, reg, tag, round_cfg):
-    """Wire the loop's stages to the real trainers, harness, and registry."""
+def _onpolicy_stages(cfg, reg, tag, round_cfg, backend: str = "hf"):
+    """Wire the loop's stages to the real trainers, harness, and registry.
+
+    `backend` reaches rollouts, the eval, and merge verification alike: a round that generated its rollouts on
+    one stack and verified its merge on another would be measuring the difference between the stacks.
+    """
     import uuid
 
     from agentdistill.eval.rollouts import build_pairs as build_pairs_fn
@@ -844,7 +861,7 @@ def _onpolicy_stages(cfg, reg, tag, round_cfg):
     state: dict[str, Any] = {}
 
     def _collect(adapter, task_ids, k, policy):
-        client = _resolve_client(adapter, cfg, "hf")
+        client = _resolve_client(adapter, cfg, backend)
         traces = [reg.get_trace(t) for t in task_ids]
         rollouts = collect_rollouts(
             [t for t in traces if t], client, grader, k=k, policy=policy,
@@ -931,7 +948,7 @@ def _onpolicy_stages(cfg, reg, tag, round_cfg):
         out_dir = cfg.artifacts_dir / "merged" / f"{row['name']}-v{row['version']}"
         info = merge_and_verify(
             row["base_model"], row["path"], str(out_dir),
-            _verification_traces(reg, cfg, 200), _turn_client_factory(cfg),
+            _verification_traces(reg, cfg, 200), _turn_client_factory(cfg, backend),
         )
         return info["out_dir"]
 
@@ -943,7 +960,7 @@ def _onpolicy_stages(cfg, reg, tag, round_cfg):
         es = reg.get_eval_set(cfg.eval.eval_set)
         traces = {t: reg.get_trace(t) for t in es["trace_ids"]}
         return run_eval(reg, es, {k: v for k, v in traces.items() if v},
-                        _resolve_client(adapter, cfg, "hf"), grader,
+                        _resolve_client(adapter, cfg, backend), grader,
                         RunSpec(subject=adapter, eval_set=cfg.eval.eval_set,
                                 n_per_task=cfg.eval.n_per_task, tag=tag))
 
@@ -1025,13 +1042,26 @@ def _resolve_client(
         # The control: replays the recorded turns. Used to prove the harness reproduces a trace.
         return "recorded"
 
+    if subject == "teacher":
+        # The teacher is an API, not a local checkpoint. This used to fall through to the local-model branch
+        # and quietly evaluate `train.base_model` under the label "teacher", which makes the single most
+        # important comparison in the report -- student against teacher -- a comparison of the student against
+        # the base model. A wrong baseline is worse than a missing one.
+        if cfg.teacher is None:
+            err.print(
+                "[red]no `teacher` section in project.yaml[/red], so there is no teacher to evaluate. "
+                "Add one, or use `recorded` to replay the teacher's own recorded turns."
+            )
+            raise typer.Exit(code=1)
+        return _teacher_client(cfg, logprobs=logprobs)
+
     if cfg.train is None:
         err.print("[red]project.yaml has no `train` section, so a model subject cannot be resolved[/red]")
         raise typer.Exit(code=1)
 
-    base_model = cfg.train.base_model
+    base_model = cfg.base_model
     adapter_path = None
-    if subject not in ("base", "teacher"):
+    if subject != "base":
         reg = _registry(cfg)
         match = next((a for a in reg.list_adapters() if a["name"] == subject or a["id"] == subject), None)
         if match is None:
@@ -1523,6 +1553,7 @@ def adapter_merge(
     adapter: str = typer.Argument(..., help="Adapter id or name."),
     out: str = typer.Option("", help="Where to write the merged weights. Defaults to artifacts/merged/<name>."),
     turns: int = typer.Option(200, help="Held-out turns to verify the merge against."),
+    backend: str = typer.Option("vllm", help="Inference backend for verification: vllm or hf."),
     force: bool = typer.Option(False, help="Register the merge even if verification fails."),
     config: str = typer.Option("project.yaml"),
 ) -> None:
@@ -1554,7 +1585,7 @@ def adapter_merge(
     console.print(f"Merging {row['name']} v{row['version']} into {row['base_model']} → {out_dir}")
     try:
         info = merge_and_verify(
-            row["base_model"], row["path"], str(out_dir), traces, _turn_client_factory(cfg)
+            row["base_model"], row["path"], str(out_dir), traces, _turn_client_factory(cfg, backend)
         )
     except MergeVerificationFailed as e:
         err.print(f"[red]merge verification failed[/red]: {e}")
@@ -1674,6 +1705,18 @@ def _training_samples(registry: Any, cfg: Any) -> list[dict]:
         return []
     with path.open() as f:
         return [json.loads(line) for line in f if line.strip()]
+
+
+def _teacher_client(cfg: Any, logprobs: bool = False) -> Any:
+    """A TurnClient that calls the configured teacher.
+
+    Routed through LiteLLM so one `teacher.model` string works for any provider, which is the same path
+    `examples/support_agent/record.py` uses to produce the traces in the first place. Evaluating the teacher
+    through a different client than recorded it would measure the client.
+    """
+    from agentdistill.eval.clients import LiteLLMTurnClient
+
+    return LiteLLMTurnClient(cfg.teacher.model, logprobs=logprobs)
 
 
 def _turn_client_factory(cfg: Any, backend: str = "vllm") -> Any:

@@ -22,7 +22,14 @@ pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="bash not a
 
 def dry_run(tmp_path: Path) -> str:
     """Run the script with every agentdistill call echoed, in a scratch copy of the repo's script."""
-    env = {"AGENTDISTILL_DRY_RUN": "1", "PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(tmp_path)}
+    # A private marker directory: the suite must never delete a real session's markers, because a GPU day
+    # that loses them redoes work that was paid for.
+    env = {
+        "AGENTDISTILL_DRY_RUN": "1",
+        "AGENTDISTILL_MARKER_DIR": str(tmp_path / "markers"),
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+        "HOME": str(tmp_path),
+    }
     proc = subprocess.run(
         ["bash", str(SCRIPT)], capture_output=True, text=True, cwd=ROOT, env=env, timeout=120, check=False
     )
@@ -30,14 +37,8 @@ def dry_run(tmp_path: Path) -> str:
     return proc.stdout
 
 
-@pytest.fixture(autouse=True)
-def _clean_markers():
-    markers = ROOT / "artifacts" / "gpu_day"
-    if markers.exists():
-        shutil.rmtree(markers)
-    yield
-    if markers.exists():
-        shutil.rmtree(markers)
+# There is no cleanup fixture on purpose. Every run here writes its markers under its own tmp_path, so nothing
+# in the repo is touched -- an earlier version deleted artifacts/gpu_day, which is a real session's resume state.
 
 
 def test_script_is_valid_bash():
@@ -66,7 +67,7 @@ def test_rerun_skips_completed_stages(tmp_path):
 
 def test_removing_a_marker_reruns_only_that_stage(tmp_path):
     dry_run(tmp_path)
-    (ROOT / "artifacts" / "gpu_day" / "sft.done").unlink()
+    (tmp_path / "markers" / "sft.done").unlink()
     out = dry_run(tmp_path)
     assert "== sft" in out and "== skip sft" not in out
     assert "== skip merge (done)" in out
@@ -160,3 +161,39 @@ def test_every_flag_the_script_passes_exists(tmp_path):
         missing += [f"`{' '.join(cmd)}` has no {f}" for f in sorted(flags) if f not in collapsed]
 
     assert not missing, "the GPU day script passes flags that do not exist:\n  " + "\n  ".join(missing)
+
+
+def test_stages_that_load_a_local_model_pin_the_backend():
+    """Every stage that loads weights locally must take `--backend "$BACKEND"`, or tiny mode reaches for vLLM.
+
+    Three stages were missed at different times -- `eval run`, then `adapter merge`, then `train onpolicy` --
+    and each failed the rehearsal only after the stages before it had already run. `eval run teacher` is
+    exempt: the teacher is an API, and it resolves to a LiteLLM client rather than to local weights.
+    """
+    text = SCRIPT.read_text()
+    checked = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("s_") or "{ ad " not in stripped:
+            continue
+        loads_weights = (
+            ("ad eval run" in stripped and "ad eval run teacher" not in stripped)
+            or "ad adapter merge" in stripped
+            or "ad train onpolicy" in stripped
+        )
+        if not loads_weights:
+            continue
+        checked += 1
+        assert '--backend "$BACKEND"' in stripped, (
+            f"this stage loads a model but pins no backend, so tiny mode will reach for vLLM:\n  {stripped}"
+        )
+    assert checked >= 6, f"expected several model-loading stages, found {checked}"
+
+
+def test_the_teacher_stage_does_not_pin_a_local_backend():
+    """`eval run teacher` calls the teacher's API. A --backend there would suggest it loads weights."""
+    for line in SCRIPT.read_text().splitlines():
+        if "ad eval run teacher" in line:
+            assert "--backend" not in line
+            return
+    raise AssertionError("the script no longer evaluates the teacher")

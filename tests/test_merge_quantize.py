@@ -264,3 +264,50 @@ def test_quantization_scoring_higher_is_not_refused():
     verdict = quantization_verdict(0.80, 0.84)
     assert verdict["ok"]
     assert verdict["drop_pp"] < 0
+
+
+def test_a_merge_defaults_to_cpu_without_cuda(monkeypatch, tmp_path):
+    """`device_map="auto"` segfaults on a machine with MPS or a partial accelerate setup, and a merge is
+    arithmetic on weights -- it does not need an accelerator at all. The rehearsal died here."""
+    import peft
+    import torch
+    import transformers
+
+    import agentdistill.train.merge as merge_mod
+
+    seen: dict = {}
+
+    class FakeModel:
+        def merge_and_unload(self):
+            return self
+
+        def save_pretrained(self, out, safe_serialization=True):
+            pass
+
+    def fake_from_pretrained(model_id, **kw):
+        seen.update(kw)
+        return FakeModel()
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(transformers.AutoModelForCausalLM, "from_pretrained", fake_from_pretrained)
+    monkeypatch.setattr(
+        transformers.AutoTokenizer, "from_pretrained",
+        lambda *a, **k: type("T", (), {"save_pretrained": lambda self, o: None})(),
+    )
+    monkeypatch.setattr(peft.PeftModel, "from_pretrained", lambda model, path, **kw: FakeModel())
+
+    info = merge_mod.merge_adapter("base", "/tmp/lora", str(tmp_path))
+
+    assert seen["device_map"] == "cpu"
+    assert "torch_dtype" not in seen, "transformers 5.x deprecated torch_dtype in favour of dtype"
+    assert seen["dtype"] is torch.bfloat16
+    assert info["device_map"] == "cpu"
+
+
+def test_an_explicit_device_map_wins():
+    """On the GPU box `auto` is right; the default only protects machines that cannot use it."""
+    import inspect
+
+    from agentdistill.train.merge import merge_adapter
+
+    assert inspect.signature(merge_adapter).parameters["device_map"].default is None

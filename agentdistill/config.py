@@ -379,6 +379,30 @@ class ProjectConfig(StrictModel):
             return p
         return (self.root / p).resolve()
 
+    def resolve_model(self, model: str) -> str:
+        """Resolve `train.base_model` when it names a local directory, and pass a Hub id through.
+
+        `../../artifacts/tiny/model` in a config is relative to that config, not to wherever the command was
+        typed. Without this, every command works from the config's own directory and fails from the repo root
+        -- which is exactly where `scripts/gpu_day.sh` runs, and is how the second rehearsal died.
+
+        A Hub id like `Qwen/Qwen3-8B` also contains a slash, so the rule is deliberately narrow: only a path
+        that is explicitly relative (`.`/`..`), absolute, or resolves to a directory that exists is rewritten.
+        Anything else is left alone and handed to the Hub, which is the right owner of "no such model".
+        """
+        if not model:
+            return model
+        text = str(model)
+        if text.startswith((".", "/", "~")):
+            return str(self.resolve(Path(text).expanduser()))
+        candidate = (self.root / text).resolve()
+        return str(candidate) if candidate.is_dir() else text
+
+    @property
+    def base_model(self) -> str | None:
+        """`train.base_model`, with a local path resolved against the config's directory."""
+        return self.resolve_model(self.train.base_model) if self.train else None
+
     @property
     def artifacts_dir(self) -> Path:
         return self.resolve(self.artifacts)
