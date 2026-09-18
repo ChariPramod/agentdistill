@@ -37,14 +37,29 @@ class BuildResult:
         return self.artifact.n_samples
 
 
-def load_tokenizer(base_model: str) -> Any:
+def base_revision(cfg: Any, model: str | None) -> dict:
+    """`{"revision": ...}` when `model` is the configured base model and a revision is pinned, else `{}`.
+
+    Only for the configured base: a merged checkpoint or an adapter row's older base is a different model, and
+    handing it the base's revision would ask the Hub for a commit that repo never had. Returned as kwargs so a
+    call site passes nothing at all when unpinned, rather than `revision=None`.
+    """
+    train = getattr(cfg, "train", None)
+    revision = getattr(train, "base_model_revision", None) if train else None
+    if not revision or not model or str(model) != str(getattr(cfg, "base_model", None)):
+        return {}
+    return {"revision": revision}
+
+
+def load_tokenizer(base_model: str, revision: str | None = None) -> Any:
     try:
         from transformers import AutoTokenizer
     except ImportError as e:  # pragma: no cover - exercised only without the extra installed
         raise ImportError(
             "building a dataset needs a tokenizer; install `agentdistill[tokenizers]` (or `[train]`)"
         ) from e
-    return AutoTokenizer.from_pretrained(base_model)
+    # The tokenizer is pinned with the weights: a retag that changed the chat template would change every token.
+    return AutoTokenizer.from_pretrained(base_model, **({"revision": revision} if revision else {}))
 
 
 def build_dataset(
@@ -72,7 +87,7 @@ def build_dataset(
     if tokenizer is None:
         if not model:
             raise ValueError("no base model: set train.base_model in project.yaml or pass base_model")
-        tokenizer = load_tokenizer(model)
+        tokenizer = load_tokenizer(model, **base_revision(cfg, model))
     model = str(model or getattr(tokenizer, "name_or_path", "<tokenizer>"))
 
     check_template(tokenizer, model).raise_if_failed()

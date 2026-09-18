@@ -18,9 +18,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TOKENIZER_DIR = ROOT / "tests" / "fixtures" / "tokenizer"
+#: The tiny model's stand-in for `train.base_model_revision`. The model is a local path, so a Hub revision means
+#: nothing for it; what pins it is that a clean rehearsal rebuilds byte-identical weights from this seed.
+SEED = 0
 
 
-def build(out: Path, tokenizer_dir: Path = TOKENIZER_DIR) -> Path:
+def build(out: Path, tokenizer_dir: Path = TOKENIZER_DIR, seed: int = SEED) -> Path:
+    import torch
     from transformers import AutoTokenizer, LlamaConfig, LlamaForCausalLM
 
     tok = AutoTokenizer.from_pretrained(str(tokenizer_dir))
@@ -38,6 +42,8 @@ def build(out: Path, tokenizer_dir: Path = TOKENIZER_DIR) -> Path:
         pad_token_id=tok.pad_token_id,
     )
     out.mkdir(parents=True, exist_ok=True)
+    # Seeded right before initialization, so nothing that ran earlier in the process moves the weights.
+    torch.manual_seed(seed)
     LlamaForCausalLM(config).save_pretrained(out)
     tok.save_pretrained(out)
     (out / "TINY").write_text(

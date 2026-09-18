@@ -79,6 +79,9 @@ class CurationResult:
     filter_config: dict
     notes: list[str] = field(default_factory=list)
     embedder_name: str = ""
+    #: The k-means centroids behind `assignments`. Saved by `curate` so the gateway can place live requests in
+    #: the same clusters the router's posteriors are keyed on.
+    centroids: Any = None
 
     @property
     def n_output(self) -> int:
@@ -142,11 +145,12 @@ def curate(
     assignments: dict[str, int] = {}
     cov: dict = {}
     embedder_name = ""
+    centroids = None
     if "stratify" in order and current:
         before = list(current)
         embedder = make_embedder(c.embeddings)
         embedder_name = embedder.name
-        assignments, _ = assign_clusters(before, embedder, k=c.clusters, seed=0)
+        assignments, centroids = assign_clusters(before, embedder, k=c.clusters, seed=0)
         drop = cap_per_cluster(before, assignments, c.cap_per_cluster)
         stage = next(s for s in stages if s.name == "stratify")
         for t in before:
@@ -176,6 +180,7 @@ def curate(
         filter_config=cfg.curation_fingerprint(),
         notes=notes,
         embedder_name=embedder_name,
+        centroids=centroids,
     )
 
 

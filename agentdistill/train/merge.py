@@ -29,7 +29,12 @@ class MergeVerificationFailed(RuntimeError):
 
 
 def merge_adapter(
-    base_model: str, adapter_path: str, out_dir: str, dtype: str = "bfloat16", device_map: str | None = None
+    base_model: str,
+    adapter_path: str,
+    out_dir: str,
+    dtype: str = "bfloat16",
+    device_map: str | None = None,
+    revision: str | None = None,
 ) -> dict:
     """Merge `adapter_path` into `base_model` and write the result to `out_dir`.
 
@@ -52,9 +57,12 @@ def merge_adapter(
     if device_map is None:
         device_map = "auto" if torch.cuda.is_available() else "cpu"
 
-    tokenizer = AutoTokenizer.from_pretrained(base_model)
+    # The adapter was trained against one base revision; merging it into another is the "base model revision
+    # that moved under the adapter" that `verify_merge` exists to catch. Pin it when the caller knows it.
+    pin = {"revision": revision} if revision else {}
+    tokenizer = AutoTokenizer.from_pretrained(base_model, **pin)
     # `dtype`, not `torch_dtype`: transformers 5.x deprecated the old name.
-    model = AutoModelForCausalLM.from_pretrained(base_model, dtype=resolved_dtype, device_map=device_map)
+    model = AutoModelForCausalLM.from_pretrained(base_model, dtype=resolved_dtype, device_map=device_map, **pin)
     merged = PeftModel.from_pretrained(model, adapter_path).merge_and_unload()
 
     os.makedirs(out_dir, exist_ok=True)
@@ -72,6 +80,9 @@ def write_marker(out_dir: str, payload: dict) -> Path:
     A directory of safetensors with no provenance is unusable six weeks later: nothing in the files says which
     adapter or which base revision they came from.
     """
+    # Created here too, not only by `merge_adapter`: the marker is also written on its own by callers that
+    # record a verification, and a writer should not depend on an earlier stage having made its directory.
+    os.makedirs(out_dir, exist_ok=True)
     path = Path(out_dir) / "agentdistill_merge.json"
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     return path
@@ -208,9 +219,11 @@ def merge_and_verify(
     client_factory: Any,
     dtype: str = "bfloat16",
     max_turns_per_trace: int | None = None,
+    revision: str | None = None,
 ) -> dict:
     """Merge, then verify, and raise rather than return a merge that does not reproduce the adapter."""
-    info = merge_adapter(base_model, adapter_path, out_dir, dtype=dtype)
+    # Forwarded only when pinned, so an unpinned merge calls `merge_adapter` exactly as it always has.
+    info = merge_adapter(base_model, adapter_path, out_dir, dtype=dtype, **({"revision": revision} if revision else {}))
     verification = verify_merge(
         out_dir, adapter_path, base_model, traces, client_factory, max_turns_per_trace
     )

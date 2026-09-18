@@ -209,6 +209,8 @@ def gate_not_worse_than_prod(ctx: dict) -> tuple[bool, str]:
     cmp = ctx.get("comparison")
     if not cmp:
         return False, "no paired comparison against prod; there is nothing to promote on"
+    if cmp.get("insufficient_power"):
+        return False, cmp["insufficient_power"]["reason"]
     lo = cmp["success"]["ci95"][0] * 100
     return (
         lo >= -MAX_SUCCESS_REGRESSION_PP,

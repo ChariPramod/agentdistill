@@ -436,6 +436,11 @@ def test_feedback_on_a_fallback_updates_neither_arm(registry):
         def state_mean(self, cluster, arm):
             return 0.5
 
+        def pooled(self, arm):
+            from agentdistill.router.thompson import ArmState
+
+            return ArmState()
+
     state = broken_student(build_state(registry))
     state.router = SpyRouter()
     app_module.set_state(state)

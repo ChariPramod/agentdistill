@@ -99,7 +99,11 @@ def lineage(registry: Any, adapter_id: str) -> dict:
 
 
 def commands_for(registry: Any, tag_glob: str | None = None) -> list[dict]:
-    """The exact invocations behind a tag's rows, so a report can say how to reproduce itself."""
+    """The exact invocations behind a tag's rows, so a report can say how to reproduce itself.
+
+    Each entry carries the row's `provenance` (commit, dirty flag, config path and hash) when one was recorded,
+    else None.
+    """
     import fnmatch
 
     out: list[dict] = []
@@ -122,9 +126,22 @@ def commands_for(registry: Any, tag_glob: str | None = None) -> list[dict]:
                     if not tag or not fnmatch.fnmatch(tag, tag_glob):
                         continue
                 out.append({"kind": kind, "id": row["id"], "command": row["command"],
-                            "at": row.get("started_at") or row.get("created_at")})
+                            "at": row.get("started_at") or row.get("created_at"),
+                            "provenance": _provenance(row.get("provenance"))})
     out.sort(key=lambda r: r.get("at") or "")
     return out
+
+
+def _provenance(value: Any) -> dict | None:
+    """A row's recorded provenance, or None for rows written before it was recorded.
+
+    Unparseable provenance reads as absent rather than failing the report: the command is still worth printing.
+    """
+    try:
+        parsed = loads(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def latest_quantized(registry: Any, parent_adapter_id: str) -> dict | None:
@@ -217,7 +234,7 @@ def calibration_for(registry: Any, adapter_id: str) -> dict | None:
     if not row:
         return None
     out = dict(row)
-    for key in ("target", "holdout_metrics", "reliability_bins", "verified", "features", "feature_order"):
+    for key in ("target", "holdout_metrics", "reliability_bins", "verified", "features", "feature_order", "report"):
         if key in out:
             out[key] = loads(out[key])
     return out

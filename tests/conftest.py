@@ -163,3 +163,15 @@ def registry(project_config):
     reg = open_registry(project_config.registry, root=project_config.root)
     yield reg
     reg.close()
+
+
+@pytest.fixture(autouse=True)
+def _pin_git_state(request, monkeypatch):
+    """Rows record the git state of the tree the suite runs in, and a developer's tree is usually dirty. Pinned
+    clean everywhere except the provenance tests, which exercise git itself, so `dirty_tree` appears only where a
+    test asks for it."""
+    if request.module.__name__.endswith("test_provenance"):
+        return
+    import agentdistill.provenance as prov
+
+    monkeypatch.setattr(prov, "git_state", lambda cwd=None: {"commit": "abc1234", "dirty": False})

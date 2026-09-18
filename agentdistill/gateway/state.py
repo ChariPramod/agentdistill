@@ -40,6 +40,11 @@ class GatewayState:
     teacher_names: set[str] = field(default_factory=set)
     k_samples: int = 2
     notes: list[str] = field(default_factory=list)
+    #: Rolling fallback and unassigned-cluster rates; fed on every request, fallbacks included.
+    tracker: Any = field(default_factory=lambda: __import__(
+        "agentdistill.gateway.health", fromlist=["HealthTracker"]).HealthTracker())
+    #: What happened to the calibration at boot: loaded with its threshold, or missing/refused with the reason.
+    calibration_state: dict = field(default_factory=lambda: {"state": "missing", "reason": "not loaded"})
 
     @property
     def ready(self) -> bool:
@@ -55,14 +60,23 @@ class GatewayState:
         return cls()
 
     def health(self) -> dict:
+        traffic = self.tracker.snapshot()
+        clusters = (self.clusters.describe() if hasattr(self.clusters, "describe")
+                    else {"state": "loaded"} if self.clusters is not None
+                    else {"state": "missing", "reason": "no cluster assigner configured"})
+        calibration = (dict(self.calibration_state, threshold=self.prod_threshold)
+                       if self.cascade_available else self.calibration_state)
         return {
-            "ok": self.ready,
+            "ok": self.ready and traffic["ok"],
             "prod_adapter": self.prod_adapter,
             "canary_adapter": self.canary_adapter,
             "canary_share": self.canary_share,
             "threshold": self.prod_threshold,
             "cascade_available": self.cascade_available,
-            "notes": self.notes,
+            "cluster_model": clusters,
+            "calibration": calibration,
+            "traffic": traffic,
+            "notes": [*self.notes, *traffic["problems"]],
         }
 
     async def cascade_turn(
@@ -159,10 +173,16 @@ def load_state(cfg: Any, registry: Any, student: Any = None, teacher: Any = None
         notes.append("no adapter is in prod, so the agent's own model name passes through to the teacher")
     else:
         state.prod_adapter = prod["name"]
+        before = len(notes)
         calibration = _load_calibration(cfg, registry, prod["id"], notes)
         if calibration:
             state.calibrator, state.prod_threshold = calibration
+            state.calibration_state = {"state": "loaded"}
         else:
+            state.calibration_state = {
+                "state": "missing",
+                "reason": notes[-1] if len(notes) > before else f"no usable calibration for {prod['name']}",
+            }
             notes.append(
                 "the prod adapter has no usable calibration, so the cascade escalates every turn. "
                 "Run `agentdistill calibrate` before claiming any cost saving."
@@ -172,6 +192,14 @@ def load_state(cfg: Any, registry: Any, student: Any = None, teacher: Any = None
     if canary:
         state.canary_adapter = canary["name"]
         state.canary_share = cfg.serve.canary_share
+
+    from agentdistill.router.clusters import load_cluster_assigner
+
+    state.clusters = load_cluster_assigner(registry)
+    placed = state.clusters.describe()
+    if placed["state"] != "loaded":
+        notes.append(f"no cluster model ({placed['reason']}); requests route on the pooled posterior and are "
+                     f"counted as unassigned on /healthz")
 
     _load_router(cfg, registry, state, notes)
 
@@ -188,6 +216,12 @@ def _load_calibration(cfg: Any, registry: Any, adapter_id: str, notes: list[str]
     try:
         row = latest_calibration(registry, adapter_id=adapter_id)
     except NoMatch:
+        return None
+    verdict = row.get("verdict")
+    if verdict is not None and verdict != "usable":
+        # A gate at chance thresholding real traffic sends the wrong turns to the teacher while reporting a
+        # threshold that sounds meaningful. Refused at load, and said on /healthz.
+        notes.append(f"calibration {row['id']} has verdict {verdict!r}; refusing to load it, every turn escalates")
         return None
     try:
         model, report = load(row["model_path"])

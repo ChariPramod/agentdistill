@@ -85,8 +85,12 @@ def best_adapter(registry: Any, tag: str | None = None, eval_set: str | None = N
     "Best" means best *measured*, so an adapter with no eval on that set is not a candidate however new it is.
     That is deliberate: the GPU script uses this to pick what to calibrate and quantize, and picking an
     unevaluated adapter would put an unmeasured model into the report.
+
+    Quantized artifacts are never candidates. They are derived from the best adapter and measured against it; on
+    a noisy eval one can outscore its own parent, and then the report would call it the student while every
+    calibration and quantization row hangs off the parent.
     """
-    adapters = _tag_filter(_rows(registry, "SELECT * FROM adapters"), tag)
+    adapters = [a for a in _tag_filter(_rows(registry, "SELECT * FROM adapters"), tag) if not a.get("quantization")]
     if not adapters:
         raise NoMatch(f"no adapter matching tag={tag!r}")
 
@@ -172,7 +176,7 @@ def latest_calibration(registry: Any, adapter_id: str | None = None) -> dict:
     if not rows:
         raise NoMatch(f"no calibration for adapter={adapter_id!r}")
     row = rows[0]
-    for key in ("target", "holdout_metrics", "reliability_bins", "verified", "features", "feature_order"):
+    for key in ("target", "holdout_metrics", "reliability_bins", "verified", "features", "feature_order", "report"):
         if key in row:
             row[key] = loads(row[key])
     return row
@@ -182,6 +186,7 @@ def rounds_for_tag(registry: Any, tag: str) -> list[dict]:
     rows = _tag_filter(_rows(registry, "SELECT * FROM onpolicy_rounds ORDER BY round_idx"), tag)
     for r in rows:
         r["compare"] = loads(r.get("compare"))
+        r["pair_stats"] = loads(r.get("pair_stats"))
     return rows
 
 

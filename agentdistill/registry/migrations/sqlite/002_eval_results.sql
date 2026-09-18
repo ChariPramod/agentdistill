@@ -23,5 +23,3 @@ CREATE TABLE IF NOT EXISTS eval_results (
 CREATE INDEX IF NOT EXISTS eval_results_run ON eval_results(eval_run_id);
 CREATE INDEX IF NOT EXISTS eval_results_task ON eval_results(eval_run_id, task_id);
 
--- The subject is recorded on the run so a comparison can name what it compared.
-CREATE TABLE IF NOT EXISTS schema_version_002 (marker INTEGER);

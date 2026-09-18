@@ -154,13 +154,17 @@ def train_sft(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     base_model = cfg["base_model"]
-    tok = AutoTokenizer.from_pretrained(base_model)
+    # `train.base_model_revision` pins the Hub commit, so a retag upstream cannot change what trains. Passed only
+    # when set, so an unpinned config calls transformers exactly as before.
+    revision = {"revision": cfg["base_model_revision"]} if cfg.get("base_model_revision") else {}
+    tok = AutoTokenizer.from_pretrained(base_model, **revision)
     attn = attn_implementation(cfg)
 
     model: Any
     try:
         model = AutoModelForCausalLM.from_pretrained(
             base_model,
+            **revision,
             quantization_config=build_quantization_config(cfg),
             dtype=torch.bfloat16 if cfg.get("bf16", True) else torch.float32,
             attn_implementation=attn,

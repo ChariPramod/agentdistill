@@ -37,6 +37,42 @@ def ci_raw(interval) -> str:
     return f" [{interval[0]:+.0f}, {interval[1]:+.0f}]"
 
 
+def comparison_line(name: str, p: dict) -> str:
+    return f"{name}: {comparison_text(p)}"
+
+
+def comparison_text(p: dict) -> str:
+    """One paired comparison as a sentence. The only place either renderer formats one, so the rule that an
+    insufficient-power result never carries a p-value is enforced once."""
+    w = p.get("insufficient_power")
+    if w:
+        o = p.get("observed") or {}
+        rates = ""
+        if o.get("rate_a") is not None and o.get("rate_b") is not None:
+            rates = f" Observed: {o['rate_a'] * 100:.1f}% vs {o['rate_b'] * 100:.1f}%, not compared."
+        return f"{w['reason']}.{rates}"
+    success = p["success"]
+    tokens = p.get("tokens") or {}
+    return (f"{success['delta'] * 100:+.1f} pp{ci_pp(success['ci95'])}, "
+            f"McNemar p={p['mcnemar']['p']:.3g}; tokens {tokens.get('median_delta', 0):+.0f}"
+            f"{ci_raw(tokens.get('ci95'))} per task.")
+
+
+def provenance_line(prov: dict | None) -> str | None:
+    """`commit <sha>[ (dirty)] config <path>@<hash>` for a recorded command, or None if nothing was recorded.
+
+    Both renderers print it as a comment under the command so the reproduce block stays pasteable.
+    """
+    if not prov:
+        return None
+    parts = []
+    if prov.get("commit") or prov.get("dirty"):
+        parts.append(f"commit {prov.get('commit') or 'unknown'}" + (" (dirty)" if prov.get("dirty") else ""))
+    if prov.get("config_path"):
+        parts.append(f"config {prov['config_path']}@{prov.get('config_hash') or 'unhashed'}")
+    return " ".join(parts) or None
+
+
 def results_block(r: ReportData) -> str:
     """The block between the markers. Every number sits on a row with its run id."""
     lines = [BEGIN, "", f"_Generated {r.generated_at} on eval set `{r.eval_set}`._", ""]
@@ -62,14 +98,7 @@ def results_block(r: ReportData) -> str:
 
     paired = r.paired.get("student_vs_teacher")
     if paired:
-        success = paired["success"]
-        tokens = paired.get("tokens") or {}
-        lines += [
-            f"**Student vs teacher:** {success['delta'] * 100:+.1f} pp{ci_pp(success['ci95'])}, "
-            f"McNemar p={paired['mcnemar']['p']:.3g}; tokens {tokens.get('median_delta', 0):+.0f}"
-            f"{ci_raw(tokens.get('ci95'))} per task.",
-            "",
-        ]
+        lines += [f"**Student vs teacher:** {comparison_text(paired)}", ""]
 
     cascade = (r.cost or {}).get("cascade")
     if cascade:
@@ -85,9 +114,11 @@ def results_block(r: ReportData) -> str:
 
     cal = r.calibration
     if cal and cal.get("holdout"):
+        verdict = cal.get("verdict")
+        tail = "" if verdict in (None, "usable") else f"; verdict **{verdict}**, so every turn escalates"
         lines += [
             f"**Gate:** holdout AUROC {num(cal['holdout'].get('auroc'), 3)}, "
-            f"ECE {num(cal['holdout'].get('ece'), 3)}, threshold {num(cal.get('threshold'), 2)} "
+            f"ECE {num(cal['holdout'].get('ece'), 3)}, threshold {num(cal.get('threshold'), 2)}{tail} "
             f"(`{cal['id']}`).",
             "",
         ]
@@ -162,7 +193,11 @@ def full_markdown(r: ReportData) -> str:
 
     if r.commands:
         lines += ["## How to reproduce", "", "```bash"]
-        lines += [c["command"] for c in r.commands]
+        for c in r.commands:
+            lines.append(c["command"])
+            note = provenance_line(c.get("provenance"))
+            if note:
+                lines.append(f"# {note}")
         lines += ["```", ""]
 
     return "\n".join(lines)

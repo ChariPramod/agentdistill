@@ -47,6 +47,7 @@ class RequestLog:
             "trace_id": None,
             "fallback": bool(meta.get("fallback", False)),
             "fallback_reason": meta.get("fallback_reason"),
+            "routing_reason": meta.get("routing_reason"),
             "payload": dumps({
                 "model": request.get("model"),
                 "n_messages": len(request.get("messages") or []),
@@ -63,11 +64,11 @@ class RequestLog:
                         """INSERT INTO requests (id, received_at, cluster_id, arm, adapter_id, confidence,
                                                  escalated, student_tokens, teacher_tokens, cost_usd, latency_ms,
                                                  outcome, trace_id, payload, fallback, fallback_reason,
-                                                 prompt_tokens, cached_prompt_tokens)
+                                                 prompt_tokens, cached_prompt_tokens, routing_reason)
                            VALUES (:id, :received_at, :cluster_id, :arm, :adapter_id, :confidence, :escalated,
                                    :student_tokens, :teacher_tokens, :cost_usd, :latency_ms, :outcome, :trace_id,
                                    :payload, :fallback, :fallback_reason, :prompt_tokens,
-                                   :cached_prompt_tokens)"""
+                                   :cached_prompt_tokens, :routing_reason)"""
                     ),
                     params,
                 )

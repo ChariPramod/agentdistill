@@ -95,6 +95,9 @@ class TeacherConfig(StrictModel):
     input_per_mtok: float | None = None
     output_per_mtok: float | None = None
     cache_read_per_mtok: float | None = None
+    #: `replay` answers with the recorded traces' own turns and fixed token counts -- a tiny-mode stand-in so the
+    #: cost block and the cascade execute on a laptop. Its numbers are structural and the report says so.
+    backend: Literal["litellm", "replay"] = "litellm"
 
 
 class EmbeddingsConfig(StrictModel):
@@ -193,6 +196,8 @@ class ToolParserConfig(StrictModel):
 
 class TrainConfig(StrictModel):
     base_model: str
+    #: Hub commit/tag for `base_model`, so an upstream retag cannot change a run. Ignored for local paths.
+    base_model_revision: str | None = None
     method: Literal["sft", "dpo", "rft", "grpo"] = "sft"
     backend: Literal["trl", "unsloth"] = "trl"
     quantization: Literal["4bit", "8bit"] | None = "4bit"
@@ -220,6 +225,8 @@ class OnPolicyConfig(StrictModel):
     min_pairs: int = Field(40, ge=1)
     #: Above this share of fuzzily-replayed tool results, the rollouts' successes do not mean much.
     max_fuzzy_share: float = Field(0.5, ge=0.0, le=1.0)
+    #: Preference pairs per task, at most. Sampled, not enumerated: k rollouts per task is k^2/4 candidate pairs.
+    pair_cap_per_task: int = Field(3, ge=1)
 
 
 class GraderConfig(StrictModel):
@@ -252,11 +259,16 @@ class EvalConfig(StrictModel):
     policy: Literal["strict", "fuzzy"] = "strict"
     grader: GraderConfig = Field(default_factory=GraderConfig)
     max_turns: int = Field(40, ge=1)
+    #: Declare that the teacher is not evaluated this run. The only way `eval run teacher` may write no row and
+    #: still pass; the report prints it as a skip, distinct from a teacher run that is simply missing.
+    skip_teacher: bool = False
 
 
 class CascadeConfig(StrictModel):
     k_samples: int = Field(2, ge=0)
     max_success_drop_pp: float = Field(1.0, ge=0.0)
+    #: `calibrate` exits 3 below this many labelled turns: a gate fitted on fewer is noise.
+    min_turns: int = Field(200, ge=1)
     features: list[str] = Field(
         default_factory=lambda: [
             "mean_logprob",

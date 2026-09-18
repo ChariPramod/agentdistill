@@ -52,6 +52,15 @@ train:
   tool_parser:
     family: agentdistill_fixture
 
+teacher:
+  # A replay stub, not a teacher: it answers with the recorded traces' own turns at fixed token counts, so the
+  # cost block and the cascade execute without an API key. The report says the cost figures are structural.
+  model: replay-stub
+  provider: replay
+  backend: replay
+  input_per_mtok: 3.0
+  output_per_mtok: 15.0
+
 eval:
   eval_set: support-holdout-tiny
   n_per_task: 1
@@ -61,9 +70,15 @@ eval:
 cascade:
   # One sample: the agreement feature is NaN at k=0, and a rehearsal should exercise the feature being present.
   k_samples: 1
+  # The real floor is 200 labelled turns. Tiny mode's calibration set is 20 tasks at N=3, which is enough to make
+  # the fit, the reliability bins, the threshold search and the verification execute -- not enough to trust.
+  min_turns: 20
 
 onpolicy:
   k_rollouts: 2
+  # Pairs are capped per task now, so a tiny corpus yields tens, not hundreds. Below the real floor of 40 the
+  # round would discard before DPO, and the rehearsal would never train the DPO stage it exists to rehearse.
+  min_pairs: 10
 
 serve:
   # fp8 writes a marker and nothing else, so this stage runs on a laptop unchanged.

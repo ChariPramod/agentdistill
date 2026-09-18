@@ -139,8 +139,9 @@ sounds like, so the verification result says which one applies and how many turn
 
 ### Tiny mode uses ten-task eval sets, not five (phase 3c §5)
 
-`eval compare` refuses below eight tasks, because a task-clustered interval over five means nothing. At the
-plan's five, the rehearsal would silently skip the comparison stage — one of the stages most worth rehearsing.
+Originally because `eval compare` refused below eight tasks. Since phase 3d the floor is 20 tasks at 3 repeats and
+a comparison below it returns an insufficient-power marker rather than refusing, so a tiny rehearsal's
+comparison stage runs and reports why it cannot compare. The ten-task sets stay.
 
 ### `eval run teacher` was evaluating the base model
 
@@ -149,6 +150,68 @@ from the adapter lookup and then fell through to the local-model branch, loading
 labelling the run "teacher". Every student-against-teacher comparison would have been a student-against-base
 comparison, and it would have been believed. `teacher` now resolves to a LiteLLM client on `teacher.model` and
 refuses when none is configured.
+
+### Phase 3d: what the plan assumed existed, and did not
+
+The plan's code sketches assumed several pieces were already wired. Three were not, and each was the same bug it
+set out to fix -- a stage that produced nothing and passed:
+
+- **`calibrate` never wrote a calibration row.** It saved `calibration.json` to disk and exited 0, so the report
+  and the gateway, which read the `calibrations` table, always saw "no calibration". It now writes the row with a
+  verdict, and exits 3 when there is nothing to write.
+- **`--verify-threshold` never recorded its measurement,** and the runner never computed a run-level escalation
+  rate from the per-row counts, so verification always printed "not a cascade". Both are fixed; the measured
+  point lands on the calibration row the report's cost block reads.
+- **Curation discarded its k-means centroids,** and the gateway never loaded a cluster model, so every request
+  reached the router unplaced. Centroids are now a `cluster_models` row; the gateway loads them or reports why not.
+
+Two more gaps sat under the cost block: nothing recorded the teacher's prompt tokens, and nothing measured
+student throughput. Both are now run metrics. Throughput is measured by the sequential harness and labelled
+unbatched, so the cost it implies is an upper bound and the report prints the conditions beside it.
+
+### The power floor is 20 tasks at 3 repeats, and below it there are no statistics (phase 3d §2.1)
+
+As the plan says. Two consequences worth knowing: a comparison where every task came out identically under both
+subjects is also refused (a zero-width interval is not a precise zero), and every promotion gate treats the
+refusal as a failure. Tiny mode runs 10 tasks at N=1, so its comparisons always report the reason.
+
+### The pair builder's cap now binds (phase 3d §2.4)
+
+The 532 pairs were two bugs, not one: teacher pairs had no per-task cap, and `pairs_against_teacher` never set
+`pair_kind`, so `balance_kinds` filed them as rollout pairs and the teacher ratio never applied either.
+
+### The replay teacher is stateless (phase 3d §3.1)
+
+The plan's stub binds a cursor per task. In a cascade the teacher is wrapped and called mid-conversation on a
+prefix the student built, where nothing binds it, so the stub finds the task from the conversation and replays
+the recorded turn at the current turn index instead.
+
+### The gate verdict has four values (phase 3d §3.2)
+
+`uninformative` (holdout AUROC below 0.55), `unreliable` (too few turns, AUROC below 0.6, or ECE above 0.05),
+`no_threshold` (a good gate with no threshold inside the budget), and `usable`. Only `usable` is loaded by the
+gateway. The threshold search runs whatever the verdict, so its code path executes on every calibration.
+
+### Two skips that are recorded decisions rather than config (phase 3d §2.2)
+
+The plan says a skip is only ever a config value. Two exceptions, both keyed on a decision already written to a
+registry row rather than inferred from absence:
+
+- `eval_r1` skips when the on-policy round kept no candidate. The round row records the discard and its reason;
+  there is simply no adapter to evaluate.
+- `calibrate` writes a row with verdict `uninformative`, rather than exiting 3, when every labelled turn has the
+  same outcome. That is a measurement -- the gate has nothing to discriminate -- and it is what a random tiny model
+  produces. Too few turns, no logprobs, no features, or a fitter crash still exit 3.
+
+### The rehearsal found three more on its first clean run
+
+- `cmp_sft` selected its left side with `eval latest --tag`, which returns the newest tagged run. Once tiny mode had
+  a teacher row, that was the teacher, and the stage compared teacher against base under the name `cmp_sft`.
+- The report picked "best adapter" without the script's tag and could pick the quantized artifact, which on a
+  noisy eval outscored its parent -- so every calibration and quantization row hung off a different adapter.
+  Quantized artifacts are no longer candidates, and the report stage passes the tag.
+- With pairs capped, a tiny round has 15 pairs and discarded before DPO, so the rehearsal never trained DPO. Tiny
+  mode now sets `onpolicy.min_pairs: 10`.
 
 ## Blocked on hardware or credentials
 

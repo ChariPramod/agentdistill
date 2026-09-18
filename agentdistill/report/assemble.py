@@ -36,6 +36,16 @@ SUBJECT_ORDER = ("base", "student", "teacher", "student_unseen", "teacher_unseen
 
 @dataclass
 class ReportData:
+    """Everything a renderer or `assert_report` needs, as plain data.
+
+    Warnings are two parallel lists: `warnings` holds the prose the renderers print, and `warning_codes[i]` is
+    the stable code for `warnings[i]`. Tooling asserts on codes because prose drifts; keeping the prose list as
+    plain strings means no renderer had to change shape. Always add a warning through `warn` so the two stay
+    aligned. The codes in use: tiny_mode, no_eval_set, no_run_found, teacher_skipped, no_student, paired_failed,
+    no_calibration, gate_not_usable, cascade_unverified, quantized_unevaluated, quantization_missing,
+    no_teacher_run, no_teacher_config, no_pricing, no_prompt_tokens, no_throughput, replay_teacher, dirty_tree.
+    """
+
     generated_at: str
     project: str
     eval_set: str
@@ -50,7 +60,12 @@ class ReportData:
     lineage: dict = field(default_factory=dict)
     commands: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
+    warning_codes: list = field(default_factory=list)
     tiny: bool = False
+
+    def warn(self, code: str, message: str) -> None:
+        self.warnings.append(message)
+        self.warning_codes.append(code)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -69,12 +84,13 @@ def assemble(registry: Any, cfg: Any, tag_glob: str | None = None, now_iso: str 
         tiny=str(getattr(cfg, "source_path", "") or "").endswith(".tiny.yaml"),
     )
     if report.tiny:
-        report.warnings.append(
+        report.warn(
+            "tiny_mode",
             "TINY MODE: this run used the CPU rehearsal config. Every number here is a smoke test of the "
             "pipeline, not a measurement of anything."
         )
     if not holdout:
-        report.warnings.append("no eval set configured; there is nothing to report")
+        report.warn("no_eval_set", "no eval set configured; there is nothing to report")
         return report
 
     def find(subject: str, eval_set: str) -> dict | None:
@@ -85,7 +101,11 @@ def assemble(registry: Any, cfg: Any, tag_glob: str | None = None, now_iso: str 
 
     def record(name: str, run: dict | None) -> None:
         if run is None:
-            report.warnings.append(f"no eval run for `{name}` on `{holdout}`")
+            if name.startswith("teacher") and getattr(cfg.eval, "skip_teacher", False):
+                # Declared, not missing. The two must read differently: one is a decision, the other a hole.
+                report.warn("teacher_skipped", f"`{name}` was skipped by configuration (eval.skip_teacher set)")
+                return
+            report.warn("no_run_found", f"no eval run for `{name}` on `{holdout}`")
             return
         m = run.get("metrics") or {}
         report.subjects[name] = {
@@ -103,7 +123,8 @@ def assemble(registry: Any, cfg: Any, tag_glob: str | None = None, now_iso: str 
         best = best_adapter(registry, tag=tag_glob, eval_set=holdout)
     except NoMatch:
         best = None
-        report.warnings.append(
+        report.warn(
+            "no_student",
             "no adapter has an eval run on the frozen set, so there is no student to report on"
         )
     student = find(best["id"], holdout) or find(best["name"], holdout) if best else None
@@ -127,18 +148,35 @@ def assemble(registry: Any, cfg: Any, tag_glob: str | None = None, now_iso: str 
             teacher_run=teacher["id"] if teacher else None,
             floor=cfg.router.floor,
         )
-        report.quantization = _quantization(registry, best, student, report)
+        report.quantization = _quantization(
+            registry, best, student, report,
+            quantization_configured=bool(getattr(getattr(cfg, "serve", None), "quantization", None)),
+        )
         report.lineage = lineage(registry, best["id"])
+
+    if teacher and (teacher.get("metrics") or {}).get("teacher_backend") == "replay":
+        # Raised here, not in cost_block, so the disclosure survives any path that skips the cost section: a
+        # replay teacher's success rate is as structural as its cost.
+        report.warn(
+            "replay_teacher",
+            "teacher metrics come from a replay stub (tiny mode); cost figures are structural, not measured",
+        )
 
     report.cost = cost_block(cfg, registry, teacher, student, report.cascade, report)
     report.commands = commands_for(registry, tag_glob)
+    dirty = sum(1 for c in report.commands if (c.get("provenance") or {}).get("dirty") is True)
+    if dirty:
+        report.warn(
+            "dirty_tree",
+            f"{dirty} run(s) were recorded from a dirty working tree; their numbers cannot be reproduced from a "
+            "commit",
+        )
     return report
 
 
 def _paired(registry: Any, student: dict | None, teacher: dict | None, base: dict | None,
             report: ReportData) -> dict:
     from agentdistill.eval.runner import compare
-    from agentdistill.eval.stats import TooFewTasks
 
     out: dict[str, Any] = {}
     for name, other in (("student_vs_teacher", teacher), ("student_vs_base", base)):
@@ -147,8 +185,8 @@ def _paired(registry: Any, student: dict | None, teacher: dict | None, base: dic
         try:
             # Student first, so a positive delta favours the student throughout the report.
             out[name] = compare(registry, student["id"], other["id"])
-        except (TooFewTasks, ValueError) as e:
-            report.warnings.append(f"{name} could not be computed: {e}")
+        except ValueError as e:
+            report.warn("paired_failed", f"{name} could not be computed: {e}")
     return out
 
 
@@ -157,36 +195,60 @@ def _calibration(registry: Any, best: dict | None, report: ReportData) -> tuple[
         return {}, {}
     row = calibration_for(registry, best["id"])
     if not row:
-        report.warnings.append(
+        report.warn(
+            "no_calibration",
             "no calibration for the best adapter, so the gateway would escalate every turn and no cost saving "
             "can be claimed"
         )
         return {}, {}
     holdout_metrics = row.get("holdout_metrics") or {}
+    verdict = row.get("verdict")
     calibration = {
         "id": row["id"], "holdout": holdout_metrics, "bins": row.get("reliability_bins") or [],
         "threshold": row.get("threshold"), "features": row.get("feature_order") or row.get("features"),
-        "ece": holdout_metrics.get("ece"), "auroc": holdout_metrics.get("auroc"),
+        "ece": holdout_metrics.get("ece"), "auroc": holdout_metrics.get("auroc"), "verdict": verdict,
+        "note": (row.get("report") or {}).get("threshold_note") or "",
     }
-    cascade = {"threshold": row.get("threshold"), "verified": row.get("verified") or []}
+    if verdict is not None and verdict != "usable":
+        report.warn(
+            "gate_not_usable",
+            f"the confidence gate's verdict is `{verdict}` (holdout AUROC "
+            f"{_fmt(holdout_metrics.get('auroc'))}), so the gateway refuses it and escalates every turn"
+        )
+    cascade = {"threshold": row.get("threshold"), "verified": row.get("verified") or [],
+               "escalate_everything": verdict is not None and verdict != "usable"}
     if not cascade["verified"]:
-        report.warnings.append(
+        report.warn(
+            "cascade_unverified",
             "the cascade threshold was never verified by the harness, so the cascade numbers below are an "
             "analytic estimate that assumes an escalated turn is as good as the teacher's"
         )
     return calibration, cascade
 
 
-def _quantization(registry: Any, best: dict, student: dict | None, report: ReportData) -> dict:
+def _fmt(x: float | None) -> str:
+    return "undefined" if x is None or x != x else f"{x:.3f}"
+
+
+def _quantization(registry: Any, best: dict, student: dict | None, report: ReportData,
+                  quantization_configured: bool = False) -> dict:
     from agentdistill.registry.select import NoMatch, latest_eval
 
     row = latest_quantized(registry, best["id"])
     if not row:
+        if quantization_configured:
+            # Serving is configured quantized, so a missing artifact means the quantize stage did not run or
+            # wrote nothing; an empty section would read as "not applicable".
+            report.warn(
+                "quantization_missing",
+                "no quantized artifact for the best adapter, so the quantization delta is unknown",
+            )
         return {}
     try:
         run = latest_eval(registry, subject=row["id"])
     except NoMatch:
-        report.warnings.append(
+        report.warn(
+            "quantized_unevaluated",
             f"the quantized artifact {row['id']} was never evaluated, so its quality delta is unknown"
         )
         return {"method": row.get("quantization"), "adapter_id": row["id"]}
@@ -206,16 +268,17 @@ def cost_block(cfg: Any, registry: Any, teacher: dict | None, student: dict | No
                cascade: dict, report: ReportData) -> dict:
     """Cost per task before and after, or an explicit reason it could not be computed."""
     if not teacher:
-        report.warnings.append("no teacher eval run, so there is no baseline cost to compare against")
+        report.warn("no_teacher_run", "no teacher eval run, so there is no baseline cost to compare against")
         return {}
     if not cfg.teacher:
-        report.warnings.append("no teacher configured, so the teacher's price is unknown")
+        report.warn("no_teacher_config", "no teacher configured, so the teacher's price is unknown")
         return {}
 
     metrics = teacher.get("metrics") or {}
     price = pricing(registry, cfg.teacher.provider, cfg.teacher.model) or _configured_price(cfg)
     if not price:
-        report.warnings.append(
+        report.warn(
+            "no_pricing",
             f"no pricing on file for {cfg.teacher.provider}/{cfg.teacher.model}; set teacher.input_per_mtok and "
             f"teacher.output_per_mtok, or load model_pricing"
         )
@@ -224,7 +287,8 @@ def cost_block(cfg: Any, registry: Any, teacher: dict | None, student: dict | No
     prompt_median = metrics.get("prompt_tokens_median")
     completion_median = metrics.get("completion_tokens_median") or metrics.get("tokens_est_median")
     if prompt_median is None:
-        report.warnings.append(
+        report.warn(
+            "no_prompt_tokens",
             "the teacher eval did not record prompt-token usage, so its per-task cost is estimated from "
             "completion tokens only and understates the real figure"
         )
@@ -244,7 +308,8 @@ def cost_block(cfg: Any, registry: Any, teacher: dict | None, student: dict | No
     student_metrics = student.get("metrics") or {}
     throughput = student_metrics.get("throughput_tok_per_s")
     if not throughput:
-        report.warnings.append(
+        report.warn(
+            "no_throughput",
             "student throughput was not measured, so cost per task cannot be computed. Throughput comes from a "
             "batched eval run; an unbatched one would overstate the cost several times over."
         )

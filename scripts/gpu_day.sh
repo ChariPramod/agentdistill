@@ -11,6 +11,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# A fixed model cache inside the repo. Rented boxes often point the default cache at a scratch or tmpfs
+# directory, and a clean run then re-downloads the base model -- silently, on the clock -- or loses it between
+# stages. An explicit HF_HOME from the environment still wins.
+export HF_HOME="${HF_HOME:-$PWD/.cache/huggingface}"
+mkdir -p "$HF_HOME"
+
 # Tiny mode runs every stage on a laptop with the fixture tokenizer, five tasks and N=1. The numbers are
 # garbage; the execution path is real. Run it before the GPU day, because the failures it finds -- a query that
 # assumed a vLLM-only field, a path that only exists after quantization -- cost minutes here and an hour there.
@@ -22,11 +28,11 @@ if [[ "${AGENTDISTILL_TINY:-0}" == "1" ]]; then
   UNSEEN_SET="${UNSEEN_SET:-support-unseen-tiny}"
   CALIB_SET="${CALIB_SET:-support-calib-tiny}"
   N_EVAL="${N_EVAL:-1}"
-  # `recorded` replays the teacher's own recorded turns, which is the honest stand-in for the teacher on a
-  # laptop: it is free, needs no key, and is literally what the teacher did. It is not a teacher baseline --
-  # a replay cannot fail in a way the recording did not -- so it rehearses the stage without pretending to
-  # measure anything.
-  TEACHER_SUBJECT="${TEACHER_SUBJECT:-recorded}"
+  # The tiny config's teacher is the replay stub (teacher.backend: replay): it answers with the recorded turns at
+  # fixed token counts, so the teacher row, the cost block and the cascade all execute without a key. Its run is
+  # tagged teacher_backend=replay and the report discloses that its costs are structural.
+  TEACHER_SUBJECT="${TEACHER_SUBJECT:-teacher}"
+  SAMPLES="${SAMPLES:-1}"
   echo "== tiny mode: CPU rehearsal, the numbers are not meaningful"
   # Idempotent: builds the tiny model and the ten-task eval sets if they are not already there. Skipped in a
   # dry run, which is meant to print a plan without touching anything.
@@ -46,6 +52,7 @@ UNSEEN_SET="${UNSEEN_SET:-support-unseen-v1}"
 CALIB_SET="${CALIB_SET:-support-calib-v1}"
 N_EVAL="${N_EVAL:-5}"
 TEACHER_SUBJECT="${TEACHER_SUBJECT:-teacher}"
+SAMPLES="${SAMPLES:-3}"
 BACKEND="${AGENTDISTILL_EVAL_BACKEND:-vllm}"
 TINY="${AGENTDISTILL_TINY:-0}"
 
@@ -58,13 +65,9 @@ mkdir -p "$MARKERS" logs
 ad() { if [[ "$DRY" == "1" ]]; then echo "agentdistill $*"; else agentdistill "$@"; fi; }
 cap() { if [[ "$DRY" == "1" ]]; then echo "<$1>"; else shift; agentdistill "$@"; fi; }
 
-stage() {
-  local name="$1"; shift
-  if [[ -f "$MARKERS/$name.done" ]]; then echo "== skip $name (done)"; return 0; fi
-  echo "== $name  $(date -u +%H:%M:%S)"
-  if [[ "$DRY" == "1" ]]; then "$@"; else "$@" 2>&1 | tee "logs/gpu_day.$name.log"; fi
-  touch "$MARKERS/$name.done"
-}
+# Markers only on exit 0; exit 3 (a stage that wrote nothing) stops the day without one. See stage_lib.sh.
+# shellcheck source=scripts/stage_lib.sh
+source "$(dirname "$0")/stage_lib.sh"
 
 BASE_MODEL="$(cap base_model config get train.base_model "${CONFIG_ARG[@]}")"
 QUANT="$(cap quantization config get serve.quantization "${CONFIG_ARG[@]}")"
@@ -126,24 +129,29 @@ s_merge()       { ad adapter merge "$(cap adapter adapter latest --tag "$TAG" "$
 s_eval_base()   { ad eval run base --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --tag "$TAG" "${CONFIG_ARG[@]}"; }
 s_eval_sft()    { ad eval run "$(cap adapter adapter latest --tag "$TAG" "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --tag "$TAG" "${CONFIG_ARG[@]}"; }
 s_eval_teach()  { ad eval run "$TEACHER_SUBJECT" --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --tag "$TAG" "${CONFIG_ARG[@]}"; }
-s_cmp_sft()     { ad eval compare "$(cap ev eval latest --tag "$TAG" "${CONFIG_ARG[@]}")" "$(cap ev eval latest --subject base "${CONFIG_ARG[@]}")" --out "$MARKERS/cmp_sft.md" "${CONFIG_ARG[@]}"; }
+# Both sides by subject. `eval latest --tag` returned whichever tagged run was newest -- the teacher's, once the
+# teacher row existed -- and the stage compared the teacher against base under the name cmp_sft.
+s_cmp_sft()     { ad eval compare "$(cap ev eval latest --subject "$(cap adapter adapter latest --tag "$TAG" "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" "${CONFIG_ARG[@]}")" "$(cap ev eval latest --subject base --eval-set "$EVAL_SET" "${CONFIG_ARG[@]}")" --out "$MARKERS/cmp_sft.md" "${CONFIG_ARG[@]}"; }
 
 s_onpolicy()    { ad train onpolicy "$(cap adapter adapter latest --tag "$TAG" "${CONFIG_ARG[@]}")" --rounds 1 --backend "$BACKEND" --tag "$TAG-r1" "${CONFIG_ARG[@]}"; }
-s_eval_r1()     { ad eval run "$(cap adapter adapter latest --tag "$TAG-r1" "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --tag "$TAG-r1" "${CONFIG_ARG[@]}"; }
-s_unseen()      { ad eval run "$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}")" --eval-set "$UNSEEN_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --tag "$TAG" "${CONFIG_ARG[@]}"; }
-
-s_logprobs()    { ad eval run "$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}")" --eval-set "$CALIB_SET" --n 3 --policy fuzzy --backend "$BACKEND" --logprobs --samples 3 --tag "$TAG-calib" "${CONFIG_ARG[@]}"; }
-s_calibrate()   { ad calibrate "$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}")" --from-eval "$(cap ev eval latest --eval-set "$CALIB_SET" "${CONFIG_ARG[@]}")" "${CONFIG_ARG[@]}"; }
-s_cascade_ver() {
-  # A cascade escalates to the teacher, so this stage structurally needs one. Tiny mode has no teacher and must
-  # not invent a stand-in: substituting the base model here would measure the base model and call it a cascade,
-  # which is the same class of mistake that made `eval run teacher` wrong for months.
-  if [[ "$TINY" == "1" ]]; then
-    echo "skipped: a cascade needs a teacher to escalate to, and tiny mode has none."
-    echo "The cascade's own code paths are covered by tests/test_cascade_client.py; this stage measures the"
-    echo "escalation rate on real traffic, which only the GPU day can do."
+s_eval_r1() {
+  # A discarded on-policy round is a result, recorded on its round row with the reason; it just leaves no
+  # candidate to evaluate. That is the one case this stage skips, and it says so in the stage's SKIPPED format.
+  local r1=""
+  if [[ "$DRY" != "1" ]]; then r1="$(agentdistill adapter latest --tag "$TAG-r1" "${CONFIG_ARG[@]}" 2>/dev/null || true)"; fi
+  if [[ "$DRY" != "1" && -z "$r1" ]]; then
+    echo "[stage eval_r1] SKIPPED: the on-policy round kept no candidate (its round row records why)"
     return 0
   fi
+  ad eval run "$(cap adapter adapter latest --tag "$TAG-r1" "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --tag "$TAG-r1" "${CONFIG_ARG[@]}"
+}
+s_unseen()      { ad eval run "$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}")" --eval-set "$UNSEEN_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --tag "$TAG" "${CONFIG_ARG[@]}"; }
+
+s_logprobs()    { ad eval run "$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}")" --eval-set "$CALIB_SET" --n 3 --policy fuzzy --backend "$BACKEND" --logprobs --samples "$SAMPLES" --tag "$TAG-calib" "${CONFIG_ARG[@]}"; }
+s_calibrate()   { ad calibrate "$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}")" --from-eval "$(cap ev eval latest --eval-set "$CALIB_SET" "${CONFIG_ARG[@]}")" "${CONFIG_ARG[@]}"; }
+s_cascade_ver() {
+  # Tiny mode escalates to the replay stub rather than skipping: a skipped stage rehearses nothing, and this is
+  # the stage that writes the verified cascade point the report's cost block reads.
   ad eval run "cascade:$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}"):auto" --eval-set "$EVAL_SET" --n 3 --policy fuzzy --backend "$BACKEND" --verify-threshold --tag "$TAG" "${CONFIG_ARG[@]}"
 }
 
@@ -160,7 +168,8 @@ s_serve_smoke() {
   fi
   bash scripts/serve_smoke.sh
 }
-s_report()      { ad report --out "$MARKERS/report.html" --include-run-ids "${CONFIG_ARG[@]}"; }
+# The same tag the calibrate and quantize stages select with, so the report's student is the adapter they used.
+s_report()      { ad report --out "$MARKERS/report.html" --tag "$TAG*" --include-run-ids "${CONFIG_ARG[@]}"; }
 
 stage env          s_env
 stage base_check   s_base_check

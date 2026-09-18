@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Prepare the CPU rehearsal: a tiny model, ten-task eval sets, an ingested registry.
+# Prepare the CPU rehearsal: a tiny model, small deterministic eval sets, an ingested registry.
 #
 # Idempotent, so `AGENTDISTILL_TINY=1 bash scripts/gpu_day.sh` can call it every run.
 #
-# Ten tasks rather than the five the plan specified: `eval compare` refuses below eight, because a
-# task-clustered interval over five tasks means nothing. At five, the rehearsal would silently skip the
-# comparison stage -- which is one of the stages most worth rehearsing.
+# Ten tasks for holdout and unseen rather than the five the plan first specified: at five, `eval compare`
+# has nothing to say. It still has little to say at ten -- below 20 tasks x 3 repeats compare returns an
+# insufficient-power marker instead of a p-value -- but the comparison stage runs end to end and the report
+# prints the reason, which is what a rehearsal is for. Calibration gets 20 tasks (plan 3.2), so that with
+# `cascade.min_turns: 20` the calibrator is actually fit rather than refused.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -13,32 +15,27 @@ EX="examples/support_agent"
 CFG="$EX/project.tiny.yaml"
 AD="${AGENTDISTILL:-agentdistill}"
 N_TASKS="${TINY_TASKS:-10}"
+N_CALIB="${TINY_CALIB_TASKS:-20}"
 
 echo "==> tiny model"
 python scripts/make_tiny_model.py --out artifacts/tiny/model
 
-echo "==> tiny eval sets ($N_TASKS tasks each)"
-python - "$EX" "$N_TASKS" <<'PY'
-import json, pathlib, sys
-
-base, n = pathlib.Path(sys.argv[1]), int(sys.argv[2])
-for src, dst in (("eval-holdout.jsonl", "eval-holdout-tiny.jsonl"),
-                 ("eval-unseen.jsonl", "eval-unseen-tiny.jsonl"),
-                 ("eval-calib.jsonl", "eval-calib-tiny.jsonl")):
-    rows = [json.loads(l) for l in (base / src).read_text().splitlines() if l.strip()]
-    # Taken from the front rather than sampled, so two rehearsals compare like with like.
-    seen, picked = set(), []
-    for r in rows:
-        tid = r.get("task_id") or r["id"]
-        if tid in seen:
-            continue
-        seen.add(tid)
-        picked.append(r)
-        if len(picked) == n:
-            break
-    (base / dst).write_text("\n".join(json.dumps(r) for r in picked) + "\n")
-    print(f"  {dst}: {len(picked)} tasks")
-PY
+echo "==> tiny eval sets ($N_TASKS holdout/unseen tasks, $N_CALIB calibration tasks)"
+# Ranked by a hash of (set name, scenario, instance), not taken from the front of the file: a clean rehearsal
+# that reorders or regenerates a source file must still pick the same tasks, and each set's printed hash is how
+# two runs prove they evaluated the same thing. The salt is the set name, so overlapping pools do not pick
+# correlated tasks.
+#
+# eval-calib.jsonl has 102 distinct tasks, none shared with holdout, unseen or traces-train, so all 20
+# calibration tasks come from it; nothing is borrowed from a set the student is scored or trained on.
+#
+# The sets are registered frozen below. An existing tiny registry keeps whatever it froze first -- that is the
+# point of freezing -- so a changed selection only takes effect on a clean run (registry deleted).
+for spec in "holdout:$N_TASKS" "unseen:$N_TASKS" "calib:$N_CALIB"; do
+  s="${spec%%:*}"; n="${spec##*:}"
+  python -m agentdistill.evalsets.generate --src "$EX/eval-$s.jsonl" --dst "$EX/eval-$s-tiny.jsonl" \
+    --n "$n" --salt "support-$s-tiny" | sed 's/^/  /'
+done
 
 echo "==> registry"
 "$AD" ingest jsonl "$EX/traces-train.jsonl" --config "$CFG" >/dev/null

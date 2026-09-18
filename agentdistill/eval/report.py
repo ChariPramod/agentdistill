@@ -16,6 +16,8 @@ def _pct(x: float) -> str:
 def render_comparison(c: dict) -> str:
     """The section 7.3 report, plus divergence and schema validity for both sides."""
     a, b = c["subject_a"], c["subject_b"]
+    if c.get("insufficient_power"):
+        return _render_refusal(c)
     ma, mb = c["metrics_a"], c["metrics_b"]
     s = c["success"]
     lo, hi = s["ci95"]
@@ -92,6 +94,22 @@ def render_comparison(c: dict) -> str:
             f"(lowest similarity {replay_a.get('min_fuzzy_score')}). A fuzzily replayed success is not a real "
             f"success; re-check with the predicate before reporting this number."
         )
+    return "\n".join(lines)
+
+
+def _render_refusal(c: dict) -> str:
+    """What a comparison below the power floor may say: the counts, the reason, and the raw rates as observed.
+    No delta, no interval, no p-value -- any of those printed here would be read as a result."""
+    a, b = c["subject_a"], c["subject_b"]
+    o = c.get("observed") or {}
+    lines = [
+        f"{a}  vs  {b}",
+        f"eval set {c['eval_set_id']}, {c['n_shared_tasks']} shared tasks, n={c.get('n_repeats', '?')} per task",
+        "",
+        f"NOT COMPARED: {c['insufficient_power']['reason']}.",
+    ]
+    if o.get("rate_a") is not None and o.get("rate_b") is not None:
+        lines.append(f"Observed success    {b} {_pct(o['rate_b'])}   {a} {_pct(o['rate_a'])}   (not compared)")
     return "\n".join(lines)
 
 

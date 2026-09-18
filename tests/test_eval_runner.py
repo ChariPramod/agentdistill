@@ -12,7 +12,6 @@ from agentdistill.eval.harness import run_task
 from agentdistill.eval.replay import ReplayToolProvider
 from agentdistill.eval.report import per_task_table, render_comparison, render_run, summarize_divergences
 from agentdistill.eval.runner import RunSpec, aggregate, compare, label_grader, run_eval, weakest_clusters
-from agentdistill.eval.stats import TooFewTasks
 from agentdistill.ingest.normalize import normalize_trace
 from tests.conftest import make_call
 
@@ -45,7 +44,8 @@ def make_eval_trace(i: int, tool_result: str = '{"customer_id": "c_1"}') -> dict
 
 @pytest.fixture
 def populated(registry):
-    traces = [make_eval_trace(i) for i in range(12)]
+    # 24 tasks: above the power floor, so comparisons on this set produce statistics rather than a refusal.
+    traces = [make_eval_trace(i) for i in range(24)]
     registry.insert_traces(traces)
     registry.insert_eval_set({
         "id": "es_test", "name": "test-set", "trace_ids": [t["id"] for t in traces],
@@ -83,7 +83,7 @@ def test_run_eval_stores_a_row_per_repeat(populated):
     run_id = run_eval(registry, registry.get_eval_set("test-set"), traces, PerTaskRecorded(traces),
                       label_grader, RunSpec(subject="recorded", eval_set="test-set", n_per_task=3))
     rows = registry.eval_results(run_id)
-    assert len(rows) == 12 * 3
+    assert len(rows) == 24 * 3
     assert {r["repeat_idx"] for r in rows} == {0, 1, 2}
 
 
@@ -94,7 +94,7 @@ def test_run_eval_records_metrics(populated):
     run = registry.get_eval_run(run_id)
     assert run["metrics"]["success"] == 1.0, "replaying the recording must reproduce it"
     assert run["metrics"]["divergence_rate"] == 0.0
-    assert run["metrics"]["n_tasks"] == 12
+    assert run["metrics"]["n_tasks"] == 24
     assert run["per_cluster"], "per-cluster breakdown drives the next curation round"
 
 
@@ -142,13 +142,14 @@ def test_aggregate_on_no_rows():
 # --------------------------------------------------------------------------------------------------------------
 
 
-def _run_two(registry, traces, degrade: bool):
-    """A second run whose client fails a third of the tasks, for a comparison with a real effect."""
+def _run_two(registry, traces, degrade: bool | tuple[int, ...]):
+    """A run whose client fails the given cases (tasks 0-6 for `True`), for a comparison with a real effect."""
+    cases = (0, 1, 2, 3, 4, 5, 6) if degrade is True else (degrade or ())
 
     class Degraded(PerTaskRecorded):
         def next_turn(self, messages, tools):
             user = next((m["content"] for m in messages if m["role"] == "user"), "")
-            if degrade and any(f"case {i}," in user for i in (0, 1, 2, 3, 4, 5, 6)):
+            if any(f"case {i}," in user for i in cases):
                 return {"role": "assistant", "content": "I cannot help with that.", "tool_calls": None}
             return super().next_turn(messages, tools)
 
@@ -163,19 +164,33 @@ def test_compare_detects_a_real_difference(populated):
     result = compare(registry, good, bad)
     assert result["success"]["delta"] > 0, "the control should beat the degraded subject"
     assert result["success"]["excludes_zero"]
-    assert result["n_shared_tasks"] == 12
+    assert result["n_shared_tasks"] == 24
     # Exact McNemar on d discordant tasks cannot go below 2 / 2**d. With 7 degraded tasks the floor is 0.016,
     # so a p under 0.05 is attainable; with 4 it would be 0.125 and no amount of effect size would help.
     assert result["mcnemar"]["n_discordant"] == 7
     assert result["mcnemar"]["p"] < 0.05
 
 
-def test_compare_reports_no_difference_between_identical_runs(populated):
+def test_compare_treats_identical_runs_as_degenerate(populated):
+    """Every task identical under both subjects gives a zero-width interval. That is data with no variance, not a
+    precise measurement of no difference, so it is refused even though the counts clear the floor."""
     registry, traces = populated
     a = _run_two(registry, traces, degrade=False)
     b = _run_two(registry, traces, degrade=False)
     result = compare(registry, a, b)
+    assert "success" not in result
+    assert result["insufficient_power"]["degenerate"]
+    assert "zero width" in result["insufficient_power"]["reason"]
+
+
+def test_compare_reports_no_difference_when_the_interval_straddles_zero(populated):
+    registry, traces = populated
+    a = _run_two(registry, traces, degrade=(0, 1, 2))
+    b = _run_two(registry, traces, degrade=(3, 4, 5))
+    result = compare(registry, a, b)
     assert result["success"]["delta"] == 0.0
+    lo, hi = result["success"]["ci95"]
+    assert lo < 0 < hi
     assert not result["success"]["excludes_zero"]
 
 
@@ -190,17 +205,34 @@ def test_compare_refuses_runs_from_different_eval_sets(populated, registry):
         compare(registry, a, b)
 
 
-def test_compare_refuses_an_eval_set_too_small(registry):
-    traces = [make_eval_trace(i) for i in range(3)]
+def _tiny_pair(registry, n_tasks: int, n_per_task: int):
+    traces = [make_eval_trace(i) for i in range(n_tasks)]
     registry.insert_traces(traces)
     registry.insert_eval_set({"id": "es_tiny", "name": "tiny", "trace_ids": [t["id"] for t in traces],
                               "grader": {"type": "label"}})
     by_task = {t["id"]: t for t in traces}
-    spec = RunSpec(subject="s", eval_set="tiny", n_per_task=1)
+    spec = RunSpec(subject="s", eval_set="tiny", n_per_task=n_per_task)
     a = run_eval(registry, registry.get_eval_set("tiny"), by_task, PerTaskRecorded(by_task), label_grader, spec)
     b = run_eval(registry, registry.get_eval_set("tiny"), by_task, PerTaskRecorded(by_task), label_grader, spec)
-    with pytest.raises(TooFewTasks, match="at least 8"):
-        compare(registry, a, b)
+    return a, b
+
+
+def test_compare_returns_a_marker_below_the_floor_rather_than_raising(registry):
+    a, b = _tiny_pair(registry, n_tasks=5, n_per_task=1)
+    result = compare(registry, a, b)
+    weak = result["insufficient_power"]
+    assert "5 tasks (need at least 20)" in weak["reason"]
+    assert "1 repeats per task (need at least 3)" in weak["reason"]
+    for key in ("success", "mcnemar", "tokens", "turns", "holm"):
+        assert key not in result, f"{key} must not be computed below the floor"
+    assert result["observed"] == {"rate_a": 1.0, "rate_b": 1.0}
+
+
+def test_compare_refusal_renders_without_a_p_value(registry):
+    a, b = _tiny_pair(registry, n_tasks=5, n_per_task=1)
+    text = render_comparison(compare(registry, a, b))
+    assert "NOT COMPARED" in text and "need at least 20" in text
+    assert "p=" not in text and "CI" not in text
 
 
 def test_compare_unknown_run(populated):
@@ -233,7 +265,7 @@ def test_comparison_report_contains_every_required_number(populated):
 
 def test_report_verdict_is_explicit_about_an_inconclusive_result(populated):
     registry, traces = populated
-    result = compare(registry, _run_two(registry, traces, False), _run_two(registry, traces, False))
+    result = compare(registry, _run_two(registry, traces, (0, 1, 2)), _run_two(registry, traces, (3, 4, 5)))
     text = render_comparison(result)
     assert "includes zero" in text
     assert "not the same as showing they are equivalent" in text
@@ -250,7 +282,7 @@ def test_per_task_table_flags_failures(populated):
     registry, traces = populated
     rows = registry.eval_results(_run_two(registry, traces, degrade=True))
     table = per_task_table(rows)
-    assert len(table) == 12
+    assert len(table) == 24
     failures = [row for row in table if row[1].startswith("0/")]
     assert failures, "the degraded run should have failing tasks"
 

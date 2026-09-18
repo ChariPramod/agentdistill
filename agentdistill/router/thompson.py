@@ -103,6 +103,25 @@ class ThompsonRouter:
             float(self.rng.beta(teacher.alpha, teacher.beta)),
         )
 
+    def pooled(self, name: str) -> ArmState:
+        """One arm's evidence across every cluster, for a request that cannot be placed in one."""
+        alpha = 1.0 + sum(s.alpha - 1.0 for (_, a), s in self.state.items() if a == name)
+        beta = 1.0 + sum(s.beta - 1.0 for (_, a), s in self.state.items() if a == name)
+        return ArmState(alpha=max(alpha, 1e-6), beta=max(beta, 1e-6))
+
+    def choose_pooled(self) -> str:
+        """Route a request with no cluster on the pooled posterior, without the floor.
+
+        The floor protects clusters the student is measurably bad at. An unassigned request is not evidence of
+        any such cluster -- it is a missing cluster model -- and applying the floor to it would turn that missing
+        file into a teacher bill.
+        """
+        student, teacher = self.pooled("student"), self.pooled("teacher")
+        return self._better(
+            float(self.rng.beta(student.alpha, student.beta)),
+            float(self.rng.beta(teacher.alpha, teacher.beta)),
+        )
+
     def _better(self, student_value: float, teacher_value: float) -> str:
         """Compare arms on success minus the dollar cost of using them."""
         student_score = student_value - self.lam * self.cost.get("student", 0.0)

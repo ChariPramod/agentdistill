@@ -18,7 +18,7 @@ from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.exc import OperationalError
 
 MIGRATIONS = Path(__file__).resolve().parent / "migrations"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 #: Migrations are applied in order; each is idempotent.
 MIGRATION_FILES = (
@@ -28,6 +28,7 @@ MIGRATION_FILES = (
     "004_phase3c.sql",
     "005_prompt_tokens.sql",
     "006_rft_kind.sql",
+    "007_phase3d.sql",
 )
 
 
@@ -36,16 +37,17 @@ def invocation() -> str:
 
     `argv[0]` is normalized to `agentdistill`. Run through `python -m agentdistill.cli` it is an absolute path
     to cli.py, which makes the report's "how to reproduce" block something you have to edit before you can run
-    it -- and a reproduction command nobody can paste is not one anybody checks.
+    it -- and a reproduction command nobody can paste is not one anybody checks. The rule lives in
+    `agentdistill.provenance`, so the command column and the provenance JSON cannot disagree.
     """
-    import sys
-    from pathlib import Path
+    from agentdistill.provenance import command
 
-    argv = list(sys.argv) or ["agentdistill"]
-    head = Path(argv[0]).name
-    if head in ("cli.py", "__main__.py", "agentdistill", "pytest", "__main__"):
-        argv[0] = "agentdistill"
-    return " ".join(argv)
+    return command()
+
+
+def _finite(x: Any) -> float | None:
+    """NaN is not a number a database column should hold; an undefined AUROC is stored as NULL."""
+    return None if x is None or x != x else float(x)
 
 
 def utcnow() -> str:
@@ -148,10 +150,14 @@ class Registry:
     def _resolve_url(url: str, root: Path | None) -> str:
         """Make a relative SQLite path relative to the config, not to the process's cwd."""
         prefix = "sqlite:///"
-        if root is None or not url.startswith(prefix):
+        if not url.startswith(prefix):
             return url
         raw = url[len(prefix) :]
-        if raw.startswith("/") or raw == ":memory:":
+        if raw == ":memory:":
+            return url
+        if raw.startswith("/") or root is None:
+            # SQLite creates the file but not its directory; a fresh checkout has neither.
+            Path(raw).parent.mkdir(parents=True, exist_ok=True)
             return url
         resolved = (root / raw).resolve()
         resolved.parent.mkdir(parents=True, exist_ok=True)
@@ -480,13 +486,17 @@ class Registry:
     # ----------------------------------------------------------------------------------------------------------
 
     def insert_training_run(self, run: dict) -> None:
+        from agentdistill.provenance import for_row
+
+        command = run.get("command") or invocation()
         with self.engine.begin() as conn:
             conn.execute(
                 text(
                     """INSERT INTO training_runs (id, dataset_id, base_model, method, parent_adapter_id, config,
-                                                  metrics, adapter_path, status, started_at, ended_at, command)
+                                                  metrics, adapter_path, status, started_at, ended_at, command,
+                                                  provenance)
                        VALUES (:id, :dataset_id, :base_model, :method, :parent_adapter_id, :config,
-                               :metrics, :adapter_path, :status, :started_at, :ended_at, :command)"""
+                               :metrics, :adapter_path, :status, :started_at, :ended_at, :command, :provenance)"""
                 ),
                 {
                     **run,
@@ -495,7 +505,8 @@ class Registry:
                     "parent_adapter_id": run.get("parent_adapter_id"),
                     "adapter_path": run.get("adapter_path"),
                     "ended_at": run.get("ended_at"),
-                    "command": run.get("command") or invocation(),
+                    "command": command,
+                    "provenance": dumps(for_row(run.get("provenance"), command)),
                 },
             )
 
@@ -527,13 +538,15 @@ class Registry:
     def insert_adapter(self, adapter: dict) -> None:
         """New adapters enter as `candidate`. Nothing is promoted on loss curves; promotion requires a paired
         eval against the current prod adapter."""
+        from agentdistill.provenance import for_row
+
         with self.engine.begin() as conn:
             conn.execute(
                 text(
                     """INSERT INTO adapters (id, training_run_id, name, version, base_model, merged, quantization,
-                                             path, status, created_at, tag, parent_adapter_id)
+                                             path, status, created_at, tag, parent_adapter_id, provenance)
                        VALUES (:id, :training_run_id, :name, :version, :base_model, :merged, :quantization,
-                               :path, :status, :created_at, :tag, :parent_adapter_id)"""
+                               :path, :status, :created_at, :tag, :parent_adapter_id, :provenance)"""
                 ),
                 {
                     "merged": False,
@@ -543,6 +556,7 @@ class Registry:
                     "tag": None,
                     "parent_adapter_id": None,
                     **adapter,
+                    "provenance": dumps(for_row(adapter.get("provenance"))),
                 },
             )
 
@@ -650,6 +664,7 @@ class Registry:
             "candidate_adapter": round_row.get("candidate_adapter"),
             "eval_run_id": ids.get("eval_run"),
             "compare": dumps(round_row.get("compare")),
+            "pair_stats": dumps(round_row.get("pair_kinds") or None),
             "decision": round_row.get("decision"),
             "reason": (round_row.get("reason") or "")[:1000],
             "started_at": utcnow(),
@@ -662,14 +677,79 @@ class Registry:
                     """INSERT INTO onpolicy_rounds (id, tag, round_idx, start_adapter_id, rollout_eval_run,
                                                     n_rollouts, fuzzy_share, rft_dataset_id, dpo_dataset_id,
                                                     sft_run_id, dpo_run_id, candidate_adapter, eval_run_id,
-                                                    compare, decision, reason, started_at, ended_at)
+                                                    compare, decision, reason, started_at, ended_at, pair_stats)
                        VALUES (:id, :tag, :round_idx, :start_adapter_id, :rollout_eval_run, :n_rollouts,
                                :fuzzy_share, :rft_dataset_id, :dpo_dataset_id, :sft_run_id, :dpo_run_id,
                                :candidate_adapter, :eval_run_id, :compare, :decision, :reason, :started_at,
-                               :ended_at)"""
+                               :ended_at, :pair_stats)"""
                 ),
                 params,
             )
+
+    def count_rounds(self) -> int:
+        with self.engine.connect() as conn:
+            return int(conn.execute(text("SELECT COUNT(*) FROM onpolicy_rounds")).scalar() or 0)
+
+    # ----------------------------------------------------------------------------------------------------------
+    # calibrations
+    # ----------------------------------------------------------------------------------------------------------
+
+    def insert_calibration(self, cal: dict) -> str:
+        """Record a fitted gate. The row, not the artifact on disk, is what the report and the gateway read."""
+        from agentdistill.provenance import for_row
+
+        cal_id = cal.get("id") or f"cal_{uuid.uuid4().hex[:16]}"
+        holdout = cal.get("holdout_metrics") or {}
+        command = cal.get("command") or invocation()
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """INSERT INTO calibrations (id, adapter_id, eval_run_id, features, model_path, threshold,
+                                                 target, ece, brier, auroc, escalation_rate, created_at,
+                                                 holdout_metrics, reliability_bins, verified, feature_order,
+                                                 command, verdict, report, provenance)
+                       VALUES (:id, :adapter_id, :eval_run_id, :features, :model_path, :threshold, :target,
+                               :ece, :brier, :auroc, :escalation_rate, :created_at, :holdout_metrics,
+                               :reliability_bins, :verified, :feature_order, :command, :verdict, :report,
+                               :provenance)"""
+                ),
+                {
+                    "id": cal_id,
+                    "adapter_id": cal["adapter_id"],
+                    "eval_run_id": cal["eval_run_id"],
+                    "features": dumps(cal["feature_order"]),
+                    "model_path": cal["model_path"],
+                    "threshold": cal["threshold"],
+                    "target": dumps(cal.get("target") or {}),
+                    "ece": _finite(holdout.get("ece")),
+                    "brier": _finite(holdout.get("brier")),
+                    "auroc": _finite(holdout.get("auroc")),
+                    "escalation_rate": cal.get("escalation_rate"),
+                    "created_at": utcnow(),
+                    "holdout_metrics": dumps(holdout),
+                    "reliability_bins": dumps(cal.get("reliability_bins") or []),
+                    "verified": dumps([]),
+                    "feature_order": dumps(cal["feature_order"]),
+                    "command": command,
+                    "verdict": cal["verdict"],
+                    "report": dumps(cal.get("report") or {}),
+                    "provenance": dumps(for_row(cal.get("provenance"), command)),
+                },
+            )
+        return cal_id
+
+    def add_verified_point(self, calibration_id: str, point: dict) -> list[dict]:
+        """Append a harness-measured cascade point to a calibration. Replaces an earlier point at the same
+        threshold: a remeasurement supersedes, it does not average."""
+        with self.engine.begin() as conn:
+            raw = conn.execute(text("SELECT verified FROM calibrations WHERE id = :id"),
+                               {"id": calibration_id}).scalar()
+            points = [p for p in (loads(raw) or []) if abs((p.get("threshold") or -1) - point["threshold"]) > 1e-9]
+            points.append(point)
+            points.sort(key=lambda p: p["threshold"])
+            conn.execute(text("UPDATE calibrations SET verified = :v WHERE id = :id"),
+                         {"v": dumps(points), "id": calibration_id})
+        return points
 
     # ----------------------------------------------------------------------------------------------------------
     # eval runs and results
@@ -678,15 +758,19 @@ class Registry:
     def start_eval_run(
         self, run_id: str, eval_set_id: str, subject: str, n_per_task: int, tag: str | None = None
     ) -> None:
+        from agentdistill.provenance import for_row
+
+        command = invocation()
         with self.engine.begin() as conn:
             conn.execute(
                 text(
                     """INSERT INTO eval_runs (id, eval_set_id, subject, n_per_task, metrics, started_at, tag,
-                                             command)
-                       VALUES (:id, :es, :subject, :n, :metrics, :started, :tag, :command)"""
+                                             command, provenance)
+                       VALUES (:id, :es, :subject, :n, :metrics, :started, :tag, :command, :provenance)"""
                 ),
                 {"id": run_id, "es": eval_set_id, "subject": subject, "n": n_per_task,
-                 "metrics": dumps({}), "started": utcnow(), "tag": tag, "command": invocation()},
+                 "metrics": dumps({}), "started": utcnow(), "tag": tag, "command": command,
+                 "provenance": dumps(for_row(None, command))},
             )
 
     def write_eval_result(self, run_id: str, outcome: Any, cluster: int | None = None,

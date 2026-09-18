@@ -6,12 +6,23 @@ and no per-turn gate rescues a task the student was never going to get right.
 
 ## Clusters
 
-Clusters come from curation: trajectories are embedded and grouped, and the assignment is stored on the trace.
-The gateway assigns an incoming request to a cluster from its messages. With the `hash` embedder clusters group
+Clusters come from curation: trajectories are embedded and grouped, the assignment is stored on the trace, and
+the centroids are saved as a `cluster_models` row beside the dataset. At boot the gateway loads the latest one and
+assigns each incoming request to its nearest centroid, embedding the same text curation embedded with the same
+embedder (the stored spec, not today's config). With the `hash` embedder clusters group
 by token overlap rather than meaning — fine for a smoke test, not for a routing decision you intend to defend.
 Set `curate.embeddings.provider` to something semantic first.
 
-A request with no cluster takes the cascade path. The router has nothing to say about a task it cannot place.
+A request the gateway cannot place -- no cluster model, or unreadable centroids -- is **unassigned**. It is
+routed on the pooled posterior (both arms' evidence summed across clusters) *without* the floor, logged with
+`cluster_id = NULL` and `routing_reason = 'no_cluster_model'`, and kept out of the per-cluster posteriors. The
+floor protects clusters the student is measurably bad at; applying it to "we do not know" would turn a missing file
+into a teacher bill.
+
+`/healthz` says so on the first request: `cluster_model` is `loaded` (with id and k) or `missing` (with the
+reason), `calibration` is `loaded` (with the threshold) or `missing` (including a refused, non-`usable` verdict),
+and `traffic` carries the rolling fallback and unassigned rates. Above 20% fallbacks or 50% unassigned over
+five minutes (at least 20 requests), `ok` is false.
 
 ## Thompson sampling, with two departures
 

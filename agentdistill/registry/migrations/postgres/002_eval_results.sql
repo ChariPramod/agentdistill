@@ -21,4 +21,3 @@ CREATE TABLE IF NOT EXISTS eval_results (
 CREATE INDEX IF NOT EXISTS eval_results_run ON eval_results(eval_run_id);
 CREATE INDEX IF NOT EXISTS eval_results_task ON eval_results(eval_run_id, task_id);
 
-CREATE TABLE IF NOT EXISTS schema_version_002 (marker INTEGER);

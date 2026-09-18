@@ -14,7 +14,7 @@ from html import escape
 from typing import Any
 
 from agentdistill.report.assemble import SUBJECT_ORDER, ReportData
-from agentdistill.report.markdown import ci_pp, ci_raw, money, num, pct
+from agentdistill.report.markdown import comparison_text, money, num, pct, provenance_line
 from agentdistill.report.svg import cost_success_chart, reliability_chart
 
 CSS = """
@@ -123,14 +123,7 @@ def _paired(r: ReportData) -> str:
         return ""
     blocks = []
     for name, cmp in r.paired.items():
-        success = cmp.get("success") or {}
-        tokens = cmp.get("tokens") or {}
-        blocks.append(
-            f"<p><strong>{escape(name.replace('_', ' '))}:</strong> "
-            f"{success.get('delta', 0) * 100:+.1f} pp{escape(ci_pp(success.get('ci95')))}, "
-            f"McNemar p={cmp.get('mcnemar', {}).get('p', float('nan')):.3g}; "
-            f"tokens {tokens.get('median_delta', 0):+.0f}{escape(ci_raw(tokens.get('ci95')))} per task.</p>"
-        )
+        blocks.append(f"<p><strong>{escape(name.replace('_', ' '))}:</strong> {escape(comparison_text(cmp))}</p>")
     return "<h2>Paired comparisons</h2>" + "".join(blocks)
 
 
@@ -168,10 +161,20 @@ def _calibration(r: ReportData) -> str:
         f"Holdout AUROC {num(holdout.get('auroc'), 3)}, ECE {num(holdout.get('ece'), 3)}, "
         f"Brier {num(holdout.get('brier'), 3)} on {num(holdout.get('n'))} turns. "
         f"Threshold {num(cal.get('threshold'), 2)}. "
+        f"{_verdict_text(cal)}"
         f"<code>{escape(str(cal.get('id', '')))}</code></p>"
         '<p class="note">Metrics come from a task-disjoint split the gate never saw; in-sample calibration error '
         "is optimistic by construction.</p>"
     )
+
+
+def _verdict_text(cal: dict) -> str:
+    verdict = cal.get("verdict")
+    if verdict in (None, "usable"):
+        return f"Verdict {escape(str(verdict))}. " if verdict else ""
+    note = f" {escape(cal['note'])}." if cal.get("note") else ""
+    return (f'<span class="below">Verdict {escape(verdict)}: the gateway refuses this gate and escalates every '
+            f"turn.</span>{note} ")
 
 
 def _per_cluster(r: ReportData) -> str:
@@ -239,7 +242,13 @@ def _lineage(r: ReportData) -> str:
 def _commands(r: ReportData) -> str:
     if not r.commands:
         return ""
-    body = "\n".join(escape(c["command"]) for c in r.commands)
+    lines = []
+    for c in r.commands:
+        lines.append(escape(c["command"]))
+        note = provenance_line(c.get("provenance"))
+        if note:
+            lines.append(f"# {escape(note)}")
+    body = "\n".join(lines)
     return f"<h2>How to reproduce</h2><pre>{body}</pre>"
 
 

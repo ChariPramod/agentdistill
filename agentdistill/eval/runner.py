@@ -15,11 +15,12 @@ from typing import Any
 from agentdistill.eval.harness import TaskOutcome, run_task
 from agentdistill.eval.replay import ReplayStats, ReplayToolProvider
 from agentdistill.eval.stats import (
+    InsufficientPower,
     cluster_bootstrap_diff,
     holm,
     mcnemar_paired,
     metric_by_task,
-    minimum_n_guard,
+    power_check,
     success_by_task,
     wilcoxon_metric,
 )
@@ -67,6 +68,7 @@ def run_eval(
     task_ids = [t for t in eval_set["trace_ids"] if t in traces_by_task]
     total = len(task_ids) * spec.n_per_task
     done = 0
+    usage_rows: list[dict[str, int]] = []
     for trace_id in task_ids:
         trace = traces_by_task[trace_id]
         for k in range(spec.n_per_task):
@@ -75,7 +77,11 @@ def run_eval(
             provider = ReplayToolProvider(trace, policy=spec.policy, fuzzy_threshold=spec.fuzzy_threshold)
             if hasattr(client, "reset"):
                 client.reset()
+            before = dict(getattr(client, "usage", None) or {})
             outcome = run_task(trace, client, provider, repeat_idx=k, max_turns=spec.max_turns)
+            after = dict(getattr(client, "usage", None) or {})
+            if after:
+                usage_rows.append({k2: after.get(k2, 0) - before.get(k2, 0) for k2 in after})
             success, detail = grader(trace, outcome)
             outcome.success = success
             outcome.grader_detail = str(detail.get("detail", ""))[:500]
@@ -86,9 +92,62 @@ def run_eval(
             if progress:
                 progress(done, total)
 
-    metrics, per_cluster = aggregate(registry.eval_results(run_id), traces_by_task)
+    rows = registry.eval_results(run_id)
+    metrics, per_cluster = aggregate(rows, traces_by_task)
+    metrics.update(usage_metrics(usage_rows))
+    metrics.update(throughput_metrics(rows))
+    if getattr(client, "backend_name", None):
+        # A replay stub's numbers are structural. The report keys its disclosure on this field.
+        metrics["teacher_backend"] = client.backend_name
+    if hasattr(client, "summary") and rows:
+        # Only a cascade has a gate summary. Without these the run records per-row escalations and nothing
+        # run-level, and `--verify-threshold` has nothing to verify.
+        metrics.update(cascade_metrics(rows, getattr(client, "threshold", None)))
     registry.finish_eval_run(run_id, metrics, per_cluster)
     return run_id
+
+
+def usage_metrics(usage_rows: list[dict[str, int]]) -> dict:
+    """Per-task token usage as the provider reported it, for the teacher's cost. Empty when the client does not
+    report usage: an estimate from completion text would understate the prompt, which is the larger half."""
+    if not usage_rows:
+        return {}
+    out = {
+        "prompt_tokens_median": _median([float(u.get("prompt_tokens", 0)) for u in usage_rows]),
+        "completion_tokens_median": _median([float(u.get("completion_tokens", 0)) for u in usage_rows]),
+    }
+    cached = [float(u.get("cached_prompt_tokens", 0)) for u in usage_rows]
+    prompts = sum(float(u.get("prompt_tokens", 0)) for u in usage_rows)
+    if any(cached) and prompts:
+        out["cache_hit_frac"] = sum(cached) / prompts
+    return out
+
+
+def throughput_metrics(rows: list[dict]) -> dict:
+    """Completion tokens per second of wall clock, and the conditions it was measured under.
+
+    The harness sends one request at a time, so this is a floor on what batched serving achieves and a cost
+    computed from it is an upper bound. The conditions string says so, and the report prints it beside the cost.
+    """
+    tokens = sum(float(r.get("completion_tokens_est") or 0) for r in rows)
+    seconds = sum(float(r.get("latency_ms") or 0) for r in rows) / 1000
+    if not tokens or seconds <= 0:
+        return {}
+    return {"throughput_tok_per_s": tokens / seconds,
+            "throughput_conditions": "sequential eval harness, one request at a time (unbatched; overstates cost)"}
+
+
+def cascade_metrics(rows: list[dict], threshold: float | None) -> dict:
+    """Run-level gate figures for a cascade subject: escalated turns over all turns, and the student tokens the
+    escalations threw away (generated, paid for, discarded)."""
+    turns = sum(int(r.get("n_turns") or 0) for r in rows)
+    escalations = sum(int(r.get("escalations") or 0) for r in rows)
+    return {
+        "escalation_rate": escalations / turns if turns else 0.0,
+        "escalations": escalations,
+        "wasted_student_tokens_median": _median([float(r.get("wasted_student_tokens") or 0) for r in rows]),
+        "cascade_threshold": threshold,
+    }
 
 
 def _median(values: list[float]) -> float:
@@ -152,8 +211,20 @@ def _counts(values: Any) -> dict[str, int]:
     return out
 
 
+def _observed_rate(outcomes: dict[str, list[float]], tasks: list[str]) -> float | None:
+    """Task-level mean success over `tasks`: what happened, with no claim about what it means."""
+    if not tasks:
+        return None
+    return sum(sum(outcomes[t]) / len(outcomes[t]) for t in tasks) / len(tasks)
+
+
 def compare(registry: Any, run_a: str, run_b: str, alpha: float = 0.05) -> dict:
-    """Paired comparison of two runs over the same eval set. `a - b`, so positive favours `a`."""
+    """Paired comparison of two runs over the same eval set. `a - b`, so positive favours `a`.
+
+    Below the power floor, or on degenerate data, the result carries `insufficient_power` and the raw observed
+    rates instead of statistics. It never raises for lack of data; it does raise for runs that cannot be paired at
+    all (unknown ids, different eval sets), because those are mistakes, not small samples.
+    """
     ra, rb = registry.get_eval_run(run_a), registry.get_eval_run(run_b)
     if ra is None or rb is None:
         raise ValueError(f"unknown eval run: {run_a if ra is None else run_b}")
@@ -165,10 +236,42 @@ def compare(registry: Any, run_a: str, run_b: str, alpha: float = 0.05) -> dict:
 
     rows_a, rows_b = registry.eval_results(run_a), registry.eval_results(run_b)
     oa, ob = success_by_task(rows_a, "success"), success_by_task(rows_b, "success")
-    shared = set(oa) & set(ob)
-    minimum_n_guard(len(shared), min(min(len(v) for v in oa.values()), min(len(v) for v in ob.values())))
+    common = sorted(set(oa) & set(ob))
+    n_repeats = min([len(oa[t]) for t in common] + [len(ob[t]) for t in common], default=0)
+    head = {
+        "subject_a": ra["subject"],
+        "subject_b": rb["subject"],
+        "run_a": run_a,
+        "run_b": run_b,
+        "eval_set_id": ra["eval_set_id"],
+        "n_shared_tasks": len(common),
+        "n_repeats": n_repeats,
+        "metrics_a": ra["metrics"],
+        "metrics_b": rb["metrics"],
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "alpha": alpha,
+    }
+
+    def refused(weak: InsufficientPower) -> dict:
+        # `observed` is labelled as such and deliberately carries no delta: a difference printed without an
+        # interval reads as a finding.
+        return {**head, "insufficient_power": weak.as_dict(),
+                "observed": {"rate_a": _observed_rate(oa, common), "rate_b": _observed_rate(ob, common)}}
+
+    weak = power_check(len(common), n_repeats)
+    if weak:
+        return refused(weak)
 
     success = cluster_bootstrap_diff(oa, ob)
+    lo, hi = success.ci95
+    if lo == hi and success.delta == 0.0:
+        # Every task came out the same under both subjects, so the interval has zero width. That is not a
+        # precise measurement of no difference; it is data with no variance to measure anything from.
+        return refused(InsufficientPower(
+            len(common), n_repeats,
+            degenerate="every task had the same outcome under both subjects, so the interval has zero width",
+        ))
+
     mcnemar = mcnemar_paired(oa, ob)
     tokens = wilcoxon_metric(
         metric_by_task(rows_a, "completion_tokens_est"), metric_by_task(rows_b, "completion_tokens_est")
@@ -177,22 +280,13 @@ def compare(registry: Any, run_a: str, run_b: str, alpha: float = 0.05) -> dict:
     significance = holm({"success": mcnemar["p"], "tokens": tokens["p"], "turns": turns["p"]}, alpha)
 
     return {
-        "subject_a": ra["subject"],
-        "subject_b": rb["subject"],
-        "run_a": run_a,
-        "run_b": run_b,
-        "eval_set_id": ra["eval_set_id"],
-        "n_shared_tasks": len(shared),
+        **head,
         "success": success.to_dict(),
         "mcnemar": mcnemar,
         "tokens": tokens,
         "turns": turns,
         "holm": significance,
-        "metrics_a": ra["metrics"],
-        "metrics_b": rb["metrics"],
         "weakest_clusters": weakest_clusters(ra.get("per_cluster") or {}, rb.get("per_cluster") or {}),
-        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
-        "alpha": alpha,
     }
 
 

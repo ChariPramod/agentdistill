@@ -37,6 +37,7 @@ class RoundCfg:
     schema_floor: float = 0.99
     divergence_slack_pp: float = 5.0
     max_teacher_ratio: float = 1.0
+    pair_cap_per_task: int = 3
 
 
 @dataclass
@@ -95,6 +96,10 @@ def decide(cmp: dict, current: dict, candidate: dict, cfg: RoundCfg) -> tuple[st
         return "discard", (
             f"divergence rate regressed by {divergence_delta:+.1f} pp, above the {cfg.divergence_slack_pp} pp slack"
         )
+
+    if cmp.get("insufficient_power"):
+        # Keeping a round needs evidence it helped; a comparison too small to make is the absence of that.
+        return "discard", cmp["insufficient_power"]["reason"]
 
     success = cmp.get("success") or {}
     lo, hi = success.get("ci95", (0.0, 0.0))

@@ -361,6 +361,8 @@ class LiteLLMTurnClient:
         self.model, self.logprobs = model, logprobs
         self.temperature, self.max_tokens = temperature, max_tokens
         self._completion = completion
+        #: Running totals as the provider reports them; the harness diffs these per task for the cost block.
+        self.usage = {"prompt_tokens": 0, "completion_tokens": 0, "cached_prompt_tokens": 0}
 
     @property
     def completion(self) -> Any:
@@ -386,6 +388,7 @@ class LiteLLMTurnClient:
             kwargs.update(logprobs=True, top_logprobs=5)
 
         response = self.completion(**kwargs)
+        self._add_usage(getattr(response, "usage", None))
         choice = response.choices[0]
         message = choice.message
         calls = [
@@ -405,6 +408,18 @@ class LiteLLMTurnClient:
         if content:
             turn["logprobs"] = {"content": content}
         return turn
+
+
+    def _add_usage(self, usage: Any) -> None:
+        if usage is None:
+            return
+        get = usage.get if isinstance(usage, dict) else (lambda k, d=None: getattr(usage, k, d))
+        self.usage["prompt_tokens"] += int(get("prompt_tokens", 0) or 0)
+        self.usage["completion_tokens"] += int(get("completion_tokens", 0) or 0)
+        details = get("prompt_tokens_details", None)
+        cached = (details.get("cached_tokens") if isinstance(details, dict)
+                  else getattr(details, "cached_tokens", None)) if details is not None else None
+        self.usage["cached_prompt_tokens"] += int(cached or 0)
 
 
 def _litellm_logprobs(choice: Any) -> list[dict]:

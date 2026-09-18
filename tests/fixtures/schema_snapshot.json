@@ -1,0 +1,1452 @@
+{
+  "adapter_events": [
+    {
+      "default": null,
+      "name": "id",
+      "notnull": 0,
+      "pk": 1,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "adapter_id",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "from_status",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "to_status",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "checks",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "actor",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "created_at",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    }
+  ],
+  "adapters": [
+    {
+      "default": null,
+      "name": "id",
+      "notnull": 0,
+      "pk": 1,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "training_run_id",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "name",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "version",
+      "notnull": 1,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "base_model",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": "0",
+      "name": "merged",
+      "notnull": 1,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "quantization",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "path",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "status",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "created_at",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "tag",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "parent_adapter_id",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "provenance",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    }
+  ],
+  "calibrations": [
+    {
+      "default": null,
+      "name": "id",
+      "notnull": 0,
+      "pk": 1,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "adapter_id",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "eval_run_id",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "features",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "model_path",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "threshold",
+      "notnull": 1,
+      "pk": 0,
+      "type": "REAL"
+    },
+    {
+      "default": null,
+      "name": "target",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "ece",
+      "notnull": 0,
+      "pk": 0,
+      "type": "REAL"
+    },
+    {
+      "default": null,
+      "name": "brier",
+      "notnull": 0,
+      "pk": 0,
+      "type": "REAL"
+    },
+    {
+      "default": null,
+      "name": "auroc",
+      "notnull": 0,
+      "pk": 0,
+      "type": "REAL"
+    },
+    {
+      "default": null,
+      "name": "escalation_rate",
+      "notnull": 0,
+      "pk": 0,
+      "type": "REAL"
+    },
+    {
+      "default": null,
+      "name": "created_at",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "holdout_metrics",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "reliability_bins",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "verified",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "feature_order",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "command",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "verdict",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "report",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "provenance",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    }
+  ],
+  "cluster_models": [
+    {
+      "default": null,
+      "name": "id",
+      "notnull": 0,
+      "pk": 1,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "dataset_id",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "embedder",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "k",
+      "notnull": 1,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "centroids_ref",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "labels",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "created_at",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    }
+  ],
+  "datasets": [
+    {
+      "default": null,
+      "name": "id",
+      "notnull": 0,
+      "pk": 1,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "name",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "version",
+      "notnull": 1,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "kind",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "filter_config",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "n_samples",
+      "notnull": 1,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "n_tokens",
+      "notnull": 1,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "content_hash",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "path",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "report_path",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "created_at",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    }
+  ],
+  "eval_results": [
+    {
+      "default": null,
+      "name": "id",
+      "notnull": 0,
+      "pk": 1,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "eval_run_id",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "task_id",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "repeat_idx",
+      "notnull": 1,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "success",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "schema_valid",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": "0",
+      "name": "diverged",
+      "notnull": 1,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "divergence",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "n_turns",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "n_tool_calls",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "completion_tokens_est",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "latency_ms",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "stop_reason",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "grader_detail",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "replay_stats",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "final_text",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "messages",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "cluster",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "logprobs_ref",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "escalations",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "wasted_student_tokens",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    }
+  ],
+  "eval_runs": [
+    {
+      "default": null,
+      "name": "id",
+      "notnull": 0,
+      "pk": 1,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "eval_set_id",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "subject",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "n_per_task",
+      "notnull": 1,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "metrics",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "paired",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "per_cluster",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "started_at",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "ended_at",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "tag",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "command",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "throughput_tok_per_s",
+      "notnull": 0,
+      "pk": 0,
+      "type": "REAL"
+    },
+    {
+      "default": null,
+      "name": "throughput_conditions",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "provenance",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    }
+  ],
+  "eval_sets": [
+    {
+      "default": null,
+      "name": "id",
+      "notnull": 0,
+      "pk": 1,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "name",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "trace_ids",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "grader",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "frozen_at",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "created_at",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    }
+  ],
+  "model_pricing": [
+    {
+      "default": null,
+      "name": "provider",
+      "notnull": 1,
+      "pk": 1,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "model",
+      "notnull": 1,
+      "pk": 2,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "input_per_mtok",
+      "notnull": 1,
+      "pk": 0,
+      "type": "NUMERIC"
+    },
+    {
+      "default": null,
+      "name": "output_per_mtok",
+      "notnull": 1,
+      "pk": 0,
+      "type": "NUMERIC"
+    },
+    {
+      "default": null,
+      "name": "cache_read_per_mtok",
+      "notnull": 0,
+      "pk": 0,
+      "type": "NUMERIC"
+    },
+    {
+      "default": null,
+      "name": "effective_from",
+      "notnull": 1,
+      "pk": 3,
+      "type": "TEXT"
+    }
+  ],
+  "onpolicy_rounds": [
+    {
+      "default": null,
+      "name": "id",
+      "notnull": 0,
+      "pk": 1,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "tag",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "round_idx",
+      "notnull": 1,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "start_adapter_id",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "rollout_eval_run",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "n_rollouts",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "fuzzy_share",
+      "notnull": 0,
+      "pk": 0,
+      "type": "REAL"
+    },
+    {
+      "default": null,
+      "name": "rft_dataset_id",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "dpo_dataset_id",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "sft_run_id",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "dpo_run_id",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "candidate_adapter",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "eval_run_id",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "compare",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "decision",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "reason",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "started_at",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "ended_at",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "pair_stats",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    }
+  ],
+  "requests": [
+    {
+      "default": null,
+      "name": "id",
+      "notnull": 0,
+      "pk": 1,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "received_at",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "cluster_id",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "arm",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "adapter_id",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "confidence",
+      "notnull": 0,
+      "pk": 0,
+      "type": "REAL"
+    },
+    {
+      "default": "0",
+      "name": "escalated",
+      "notnull": 1,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "student_tokens",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "teacher_tokens",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "cost_usd",
+      "notnull": 0,
+      "pk": 0,
+      "type": "NUMERIC"
+    },
+    {
+      "default": null,
+      "name": "latency_ms",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "outcome",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "trace_id",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "payload",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": "0",
+      "name": "fallback",
+      "notnull": 1,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "fallback_reason",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "prompt_tokens",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "cached_prompt_tokens",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "routing_reason",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    }
+  ],
+  "router_state": [
+    {
+      "default": null,
+      "name": "cluster_id",
+      "notnull": 1,
+      "pk": 1,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "arm",
+      "notnull": 1,
+      "pk": 2,
+      "type": "TEXT"
+    },
+    {
+      "default": "1",
+      "name": "alpha",
+      "notnull": 1,
+      "pk": 0,
+      "type": "REAL"
+    },
+    {
+      "default": "1",
+      "name": "beta",
+      "notnull": 1,
+      "pk": 0,
+      "type": "REAL"
+    },
+    {
+      "default": null,
+      "name": "updated_at",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    }
+  ],
+  "samples": [
+    {
+      "default": null,
+      "name": "id",
+      "notnull": 0,
+      "pk": 1,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "dataset_id",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "trace_id",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "kind",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "n_tokens",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "n_target_tokens",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "row_idx",
+      "notnull": 1,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "sample_hash",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    }
+  ],
+  "schema_migrations": [
+    {
+      "default": null,
+      "name": "filename",
+      "notnull": 0,
+      "pk": 1,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "applied_at",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    }
+  ],
+  "schema_version": [
+    {
+      "default": null,
+      "name": "version",
+      "notnull": 0,
+      "pk": 1,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "applied_at",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    }
+  ],
+  "trace_embeddings": [
+    {
+      "default": null,
+      "name": "trace_id",
+      "notnull": 0,
+      "pk": 1,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "model",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "dim",
+      "notnull": 1,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "embedding",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    }
+  ],
+  "traces": [
+    {
+      "default": null,
+      "name": "id",
+      "notnull": 0,
+      "pk": 1,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "source",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "source_ref",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "task_id",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "task_input",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "messages",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "tools",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "teacher_model",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "success",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "grader",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "score",
+      "notnull": 0,
+      "pk": 0,
+      "type": "REAL"
+    },
+    {
+      "default": null,
+      "name": "n_turns",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "n_tool_calls",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "prompt_tokens",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "completion_tokens",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "cost_usd",
+      "notnull": 0,
+      "pk": 0,
+      "type": "NUMERIC"
+    },
+    {
+      "default": null,
+      "name": "content_hash",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "cluster",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "metadata",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "created_at",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "parent_adapter_id",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "repeat_idx",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "replay_policy",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": "0",
+      "name": "fuzzy_hits",
+      "notnull": 0,
+      "pk": 0,
+      "type": "INTEGER"
+    },
+    {
+      "default": null,
+      "name": "tag",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    }
+  ],
+  "training_runs": [
+    {
+      "default": null,
+      "name": "id",
+      "notnull": 0,
+      "pk": 1,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "dataset_id",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "base_model",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "method",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "parent_adapter_id",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "config",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "metrics",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "adapter_path",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "status",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "started_at",
+      "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "ended_at",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "command",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "provenance",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    }
+  ]
+}

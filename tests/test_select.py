@@ -227,3 +227,23 @@ def test_rounds_for_tag(seeded):
 
 def test_rounds_for_an_unknown_tag_is_empty(seeded):
     assert rounds_for_tag(seeded, "nope") == []
+
+
+def test_best_adapter_never_picks_a_quantized_artifact(registry):
+    """A quantized artifact that outscores its parent on a noisy eval must not become the report's student."""
+    from agentdistill.registry.select import best_adapter
+
+    registry.insert_dataset({"id": "ds1", "name": "d", "version": 1, "kind": "sft", "filter_config": {},
+                             "n_samples": 1, "n_tokens": 1, "content_hash": "h", "path": "/tmp/d"})
+    registry.insert_training_run({"id": "tr1", "dataset_id": "ds1", "base_model": "m", "method": "sft",
+                                  "config": {}, "status": "succeeded", "started_at": "2026-09-18T00:00:00+00:00"})
+    registry.insert_adapter({"id": "parent", "training_run_id": "tr1", "name": "p", "version": 1,
+                             "base_model": "m", "path": "/tmp/p"})
+    registry.insert_adapter({"id": "fp8", "training_run_id": "tr1", "name": "p-fp8", "version": 1,
+                             "base_model": "m", "path": "/tmp/q", "quantization": "fp8",
+                             "parent_adapter_id": "parent"})
+    registry.insert_eval_set({"id": "es_h", "name": "h", "trace_ids": [], "grader": {}})
+    for run_id, subject, success in (("ev_p", "parent", 0.5), ("ev_q", "fp8", 0.6)):
+        registry.start_eval_run(run_id, "es_h", subject, 1)
+        registry.finish_eval_run(run_id, {"success": success})
+    assert best_adapter(registry, eval_set="h")["id"] == "parent"

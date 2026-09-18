@@ -12,6 +12,16 @@ Anything else you have to type is a bug report for the next rehearsal.
 The script is resumable. Each stage writes `artifacts/gpu_day/<stage>.done` and is skipped on rerun, so a failed
 stage costs one stage rather than the session. `rm artifacts/gpu_day/sft.done` forces one stage to run again.
 
+A stage gets its marker only on exit 0. Every stage that is supposed to write a registry row (`eval run`,
+`calibrate`, `train onpolicy`, `adapter quantize`, `report`) exits **3** if it wrote none, which stops the day
+without a marker so the rerun retries it. The only way to pass without a row is a skip declared in config
+(`eval.skip_teacher: true`), and the two log lines look different on purpose:
+
+```
+[stage eval_teach] SKIPPED: eval.skip_teacher set
+[stage eval_teach] wrote no row: run ev_… on support-holdout-v1 stored no results for teacher
+```
+
 ## Pre-flight, the day before
 
 **1. Tiny rehearsal green from a clean checkout.**
@@ -62,6 +72,20 @@ real one. `scripts/tiny_setup.sh` builds all of it and is idempotent.
 
 **The numbers mean nothing.** The model is random; it cannot do the task. The report carries a tiny-mode
 warning for exactly this reason, and `report --inject` will write that warning into whatever file it targets.
+
+Tiny mode covers every section of the report, not two thirds of it. Its teacher is a **replay stub**
+(`teacher.backend: replay` in `project.tiny.yaml`): it answers with the recorded turns at fixed token counts,
+so the teacher row, the cost block, and the cascade verification all execute without an API key. Its runs are
+tagged `teacher_backend: replay`, and the report never shows their cost without saying it is structural. The
+calibration set is 20 tasks at N=3 with `cascade.min_turns: 20`, enough to make the fit, the reliability bins,
+the threshold search and `--verify-threshold` execute. With a random model the gate's AUROC sits near chance, so
+its verdict is `uninformative` and the cascade escalates every turn -- the report says exactly that.
+
+**The clean rehearsal** is `bash scripts/clean_rehearsal.sh`. It deletes every tiny artifact (registry,
+datasets, adapters, markers, the generated eval sets), reruns the day, and asserts the report's `report.json`
+sidecar: base, student and teacher rows with run ids; calibration, cascade, cost and quantization populated; and
+no warning except the tiny-mode disclosures (`tiny_mode`, `replay_teacher`, an `uninformative` gate). Warnings
+are matched by stable code, so rewording one cannot silently pass or fail the check.
 
 What the rehearsal cannot cover: vLLM itself — no real tool parser, no LoRA loading, no template handling — and
 anything CUDA. That is what `scripts/serve_smoke.sh` on the real box is for, and it is the first thing to run

@@ -123,11 +123,16 @@ def promotion_checks(registry: Any, adapter_id: str, to: str, cfg: Any) -> dict[
                 False, f"the current prod adapter has no eval on {eval_set!r}, so there is nothing to compare to"
             )
         else:
+            cmp = None
             try:
                 cmp = compare(registry, run["id"], current_run["id"])
             except Exception as e:
                 checks["not_worse_than_prod"] = Check(False, f"comparison failed: {type(e).__name__}: {e}")
-            else:
+            if cmp is not None and cmp.get("insufficient_power"):
+                # Parity that was never measured is not parity. Fail, and say why, rather than let a small eval
+                # set wave a candidate through on the absence of evidence against it.
+                checks["not_worse_than_prod"] = Check(False, cmp["insufficient_power"]["reason"])
+            elif cmp is not None:
                 lo = cmp["success"]["ci95"][0] * 100
                 checks["not_worse_than_prod"] = Check(
                     ok=lo >= -MAX_SUCCESS_REGRESSION_PP,

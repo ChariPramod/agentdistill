@@ -227,20 +227,24 @@ def test_retrain_is_implemented(project):
 
 
 def test_report_is_implemented(project):
-    """`report` is built; with an empty registry it must still render, with warnings."""
+    """`report` is built; with an empty registry it must still render, with warnings -- and exit 3, because a
+    report with no subjects is a pipeline that produced nothing."""
     _init(project)
     result = run("report", "--format", "md")
     combined = out(result)
     assert "not built yet" not in combined
-    assert result.exit_code == 0
     assert "agentdistill:results:begin" in combined
+    assert (project / "reports" / "report.md").exists() or "wrote" in combined
+    assert result.exit_code == 3
+    assert "[stage report] wrote no row" in combined
 
 
 def test_report_injects_into_the_readme(project):
     _init(project)
     readme = project / "README.md"
     readme.write_text("# My agent\n\nIntro.\n")
-    assert run("report", "--format", "md", "--inject", str(readme)).exit_code == 0
+    # Exit 3: an empty registry has no subjects. The injection still happens, and says so.
+    assert run("report", "--format", "md", "--inject", str(readme)).exit_code == 3
     once = readme.read_text()
     assert "## Results" in once
     run("report", "--format", "md", "--inject", str(readme))
@@ -306,3 +310,19 @@ def test_train_sft_is_implemented(project):
     assert "not built yet" not in out(result)
     assert result.exit_code == 1
     assert "no dataset named" in out(result)
+
+
+def test_curate_saves_the_cluster_model_the_gateway_loads(project):
+    """Curation used to compute centroids and discard them, so the gateway could never place a request."""
+    from agentdistill.config import ProjectConfig
+    from agentdistill.registry.base import Registry
+    from agentdistill.router.clusters import load_cluster_assigner
+
+    _init(project)
+    run("ingest", "jsonl", "traces.jsonl")
+    result = run("curate")
+    assert result.exit_code == 0, out(result)
+    assert "cluster model" in out(result)
+    assigner = load_cluster_assigner(Registry.from_config(ProjectConfig.load("project.yaml")))
+    assert assigner.describe()["state"] == "loaded"
+    assert assigner.assign([{"role": "user", "content": "Where is order 3 for my account"}]) >= 0

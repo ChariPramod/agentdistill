@@ -31,19 +31,47 @@ class TooFewTasks(ValueError):
     """The comparison cannot support an interval. Refusing is better than printing a meaningless one."""
 
 
-def minimum_n_guard(n_tasks: int, n_per_task: int, min_tasks: int = 8, min_repeats: int = 1) -> None:
-    """Refuse comparisons too small to say anything.
+#: Below either floor a paired comparison is not reported as statistics at all. Twenty tasks is roughly where a
+#: task-clustered bootstrap stops being dominated by which handful of tasks happened to be drawn; three repeats
+#: is the least that separates a task the subject cannot do from one it got unlucky on.
+MIN_TASKS = 20
+MIN_REPEATS = 3
 
-    A single repeat per task is allowed — it is the honest N=1 case — but fewer than a handful of *tasks* makes
-    a bootstrap interval meaningless, because there is nothing to resample.
-    """
-    if n_tasks < min_tasks:
-        raise TooFewTasks(
-            f"only {n_tasks} tasks overlap between the two runs; at least {min_tasks} are needed for a "
-            f"task-clustered interval to mean anything. Run the two subjects on the same eval set."
-        )
-    if n_per_task < min_repeats:
-        raise TooFewTasks(f"n_per_task is {n_per_task}; at least {min_repeats} is required")
+
+@dataclass(frozen=True)
+class InsufficientPower:
+    """Why a comparison was not made. Returned in place of statistics, never raised: a report that fails to
+    render is worse than one that says it cannot compare."""
+
+    n_tasks: int
+    n_repeats: int
+    min_tasks: int = MIN_TASKS
+    min_repeats: int = MIN_REPEATS
+    #: Set when the counts pass but the data cannot carry an interval (every task identical under both).
+    degenerate: str | None = None
+
+    @property
+    def reason(self) -> str:
+        parts = []
+        if self.n_tasks < self.min_tasks:
+            parts.append(f"{self.n_tasks} tasks (need at least {self.min_tasks})")
+        if self.n_repeats < self.min_repeats:
+            parts.append(f"{self.n_repeats} repeats per task (need at least {self.min_repeats})")
+        if self.degenerate:
+            parts.append(self.degenerate)
+        return "not enough data for a comparison: " + ", ".join(parts)
+
+    def as_dict(self) -> dict:
+        return {"insufficient_power": True, "n_tasks": self.n_tasks, "n_repeats": self.n_repeats,
+                "min_tasks": self.min_tasks, "min_repeats": self.min_repeats, "degenerate": self.degenerate,
+                "reason": self.reason}
+
+
+def power_check(n_tasks: int, n_repeats: int) -> InsufficientPower | None:
+    """None when the comparison has enough tasks and repeats to be reported as statistics."""
+    if n_tasks < MIN_TASKS or n_repeats < MIN_REPEATS:
+        return InsufficientPower(n_tasks, n_repeats)
+    return None
 
 
 def _paired_task_means(

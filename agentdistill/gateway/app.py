@@ -31,6 +31,7 @@ from agentdistill.gateway.dialect import (
 from agentdistill.gateway.resolve import UnknownModel, resolve
 from agentdistill.gateway.state import GatewayState, NoTeacher
 from agentdistill.router.canary import use_canary
+from agentdistill.router.clusters import UNASSIGNED
 
 logger = logging.getLogger(__name__)
 
@@ -61,13 +62,25 @@ async def handle(req: dict) -> tuple[dict, dict, dict]:
     except UnknownModel as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    cluster = gw.clusters.assign(req["messages"]) if gw.clusters else None
+    cluster = gw.clusters.assign(req["messages"]) if gw.clusters is not None else UNASSIGNED
+    unassigned = cluster is None or cluster == UNASSIGNED
+    if unassigned:
+        cluster = None
     meta: dict[str, Any] = {
         "id": request_id, "cluster_id": cluster, "route": route.mode, "adapter": route.adapter,
     }
+    if unassigned:
+        meta["routing_reason"] = "no_cluster_model"
 
     if route.mode == "router":
-        arm = gw.router.choose(cluster) if (gw.router and cluster is not None) else "student"
+        if gw.router is None:
+            arm = "student"
+        elif unassigned:
+            # Pooled, without the floor: "we do not know the cluster" is not evidence the student is bad here.
+            arm = gw.router.choose_pooled()
+        else:
+            arm = gw.router.choose(cluster)
+            meta["routing_reason"] = "cluster_posterior"
         meta["router_arm"] = arm
         if arm == "teacher":
             route.mode = "teacher"
@@ -77,7 +90,12 @@ async def handle(req: dict) -> tuple[dict, dict, dict]:
                 route.adapter = gw.canary_adapter
                 meta["canary"] = True
 
-    cluster_prior = gw.router.state_mean(cluster, "student") if (gw.router and cluster is not None) else 0.5
+    if gw.router is None:
+        cluster_prior = 0.5
+    elif unassigned:
+        cluster_prior = gw.router.pooled("student").mean
+    else:
+        cluster_prior = gw.router.state_mean(cluster, "student")
 
     try:
         choice, usage, arm_meta = await _dispatch(route, req, cluster_prior)
@@ -99,6 +117,9 @@ async def handle(req: dict) -> tuple[dict, dict, dict]:
         raise HTTPException(status_code=503, detail=str(e)) from e
 
     meta.update(arm_meta)
+    # Every answered request, the fallback path included: a tracker fed only on the happy path reports healthy
+    # while everything escalates.
+    gw.tracker.record(fallback=bool(meta.get("fallback")), unassigned=unassigned)
     meta["latency_ms"] = int((time.time() - started) * 1000)
     meta.setdefault("adapter", route.adapter)
     if gw.log is not None:

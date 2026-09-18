@@ -226,6 +226,20 @@ def test_live_comparison_without_a_prod_adapter(seeded):
     assert compare_live(seeded, None, "canary") is None
 
 
+def test_an_unpowered_comparison_against_prod_blocks_promotion(seeded, cfg):
+    """No per-task rows means no comparison. Parity that was never measured must fail the check with the reason,
+    and the checks after it must still run so the operator sees everything that is missing at once."""
+    add_adapter(seeded, "old", status="prod")
+    add_adapter(seeded, "new", version=2)
+    add_eval(seeded, "ev_old", "old", 0.7)
+    add_eval(seeded, "ev_new", "new", 0.9)
+    checks = promotion_checks(seeded, "new", "canary", cfg)
+    assert not checks["not_worse_than_prod"].ok
+    assert "not enough data for a comparison" in checks["not_worse_than_prod"].detail
+    assert "cost_not_worse" not in checks
+    assert "calibrated" in checks
+
+
 def test_promoting_a_canary_to_prod_requires_live_evidence(seeded, cfg):
     add_adapter(seeded, "old", status="prod")
     add_adapter(seeded, "canary", status="canary", version=2)

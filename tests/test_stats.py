@@ -16,7 +16,7 @@ from agentdistill.eval.stats import (
     holm,
     mcnemar_paired,
     metric_by_task,
-    minimum_n_guard,
+    power_check,
     success_by_task,
     wilcoxon_metric,
 )
@@ -232,13 +232,27 @@ def test_holm_family_wise_error_rate_under_the_null():
 # --------------------------------------------------------------------------------------------------------------
 
 
-def test_minimum_n_guard_refuses_a_tiny_eval_set():
-    with pytest.raises(TooFewTasks, match="at least 8"):
-        minimum_n_guard(3, 5)
+def test_power_check_refuses_too_few_tasks():
+    weak = power_check(5, 5)
+    assert weak is not None
+    assert "5 tasks (need at least 20)" in weak.reason
+    assert "repeats" not in weak.reason
 
 
-def test_minimum_n_guard_allows_a_single_repeat():
-    minimum_n_guard(20, 1)
+def test_power_check_refuses_a_single_repeat():
+    weak = power_check(40, 1)
+    assert weak is not None
+    assert "1 repeats per task (need at least 3)" in weak.reason
+
+
+def test_power_check_names_both_shortfalls():
+    weak = power_check(5, 1)
+    assert "tasks" in weak.reason and "repeats" in weak.reason
+    assert weak.as_dict()["insufficient_power"] is True
+
+
+def test_power_check_passes_at_the_floor():
+    assert power_check(20, 3) is None
 
 
 def test_success_by_task_groups_repeats():

@@ -34,6 +34,13 @@ MAX_ACCEPTABLE_ECE = 0.05
 #: Below this, the gate is not distinguishing good turns from bad ones at all.
 MIN_USEFUL_AUROC = 0.6
 
+#: Below this holdout AUROC the gate is at chance, and its verdict is `uninformative`. The gateway refuses to
+#: load such a calibration, so a coin flip never decides which turns reach the teacher.
+MIN_INFORMATIVE_AUROC = 0.55
+
+#: The verdicts a calibration row can carry. Only `usable` is ever loaded by the gateway.
+VERDICTS = ("usable", "no_threshold", "unreliable", "uninformative")
+
 #: Minimum minority-class samples per calibration fold.
 MIN_PER_FOLD = 10
 
@@ -52,12 +59,17 @@ class CalibrationResult:
     label_mix: dict = field(default_factory=dict)
     model: Any = field(default=None, repr=False)
     notes: list[str] = field(default_factory=list)
+    min_turns: int = MIN_TURNS
+    #: Why no model was fitted, when none was: `too_few_turns`, `no_features`, `single_class`, `fit_error`. Only
+    #: `single_class` is a measurement (every turn got the same label, so there is nothing to discriminate); the
+    #: rest mean the input could not support a fit at all.
+    unfit_reason: str | None = None
 
     @property
     def usable(self) -> bool:
         """Is this gate worth thresholding on, rather than escalating everything?"""
         return (
-            self.n_turns >= MIN_TURNS
+            self.n_turns >= self.min_turns
             and self.holdout.get("auroc", 0.0) >= MIN_USEFUL_AUROC
             and self.holdout.get("ece", 1.0) <= MAX_ACCEPTABLE_ECE
         )
@@ -73,7 +85,28 @@ class CalibrationResult:
             "label_mix": self.label_mix,
             "usable": self.usable,
             "notes": self.notes,
+            "min_turns": self.min_turns,
+            "unfit_reason": self.unfit_reason,
         }
+
+
+def gate_verdict(result: CalibrationResult, threshold_chosen: bool) -> str:
+    """One word for what the gate is good for. Only a fitted gate has a verdict; an unfitted one has no row.
+
+    - `uninformative`: holdout AUROC below 0.55, or undefined. The gate is at chance.
+    - `unreliable`: it separates turns somewhat, but too few turns, too low an AUROC, or an ECE too high to
+      threshold on.
+    - `no_threshold`: a good gate, but no threshold keeps the success drop inside the budget.
+    - `usable`: the only verdict the gateway loads.
+    """
+    auroc = result.holdout.get("auroc")
+    if auroc is None or auroc != auroc or auroc < MIN_INFORMATIVE_AUROC:
+        return "uninformative"
+    if not result.usable:
+        return "unreliable"
+    if not threshold_chosen:
+        return "no_threshold"
+    return "usable"
 
 
 def split_by_task(task_ids: list[str], frac: float = 0.7, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
@@ -160,19 +193,21 @@ def fit_calibrator(
     seed: int = 0,
     fit_frac: float = 0.7,
     label_mix: dict | None = None,
+    min_turns: int = MIN_TURNS,
 ) -> CalibrationResult:
     """Fit on a task-disjoint split, report on the rest, refit on everything for the artifact."""
     notes: list[str] = []
     n_tasks = len(set(task_ids))
 
-    if len(y) < MIN_TURNS:
+    if len(y) < min_turns:
         notes.append(
-            f"only {len(y)} labelled turns (need {MIN_TURNS}); the gate is not fitted and the cascade should "
+            f"only {len(y)} labelled turns (need {min_turns}); the gate is not fitted and the cascade should "
             f"escalate everything"
         )
         return CalibrationResult(
             feature_order=feature_order, holdout={}, in_sample={}, reliability_bins=[],
             n_turns=len(y), n_tasks=n_tasks, label_mix=label_mix or {}, model=None, notes=notes,
+            min_turns=min_turns, unfit_reason="too_few_turns",
         )
 
     # A feature with no finite value anywhere carries no signal, and HistGradientBoosting cannot bin it -- it
@@ -192,6 +227,7 @@ def fit_calibrator(
         return CalibrationResult(
             feature_order=[], holdout={}, in_sample={}, reliability_bins=[],
             n_turns=len(y), n_tasks=n_tasks, label_mix=label_mix or {}, model=None, notes=notes,
+            min_turns=min_turns, unfit_reason="no_features",
         )
 
     if len(set(y.tolist())) < 2:
@@ -202,9 +238,14 @@ def fit_calibrator(
             f"every one of the {len(y)} labelled turns has the same outcome, so no gate can be fitted. "
             f"Escalate everything, and check the turn labels before trying again."
         )
+        # Recorded as what it is: a measurement with no variance. AUROC is undefined, which is the definition of
+        # a gate that cannot separate anything.
+        holdout = {"n": len(y), "positive_rate": float(y.mean()), "auroc": float("nan"), "ece": float("nan"),
+                   "brier": float("nan")}
         return CalibrationResult(
-            feature_order=feature_order, holdout={}, in_sample={}, reliability_bins=[],
+            feature_order=feature_order, holdout=holdout, in_sample={}, reliability_bins=[],
             n_turns=len(y), n_tasks=n_tasks, label_mix=label_mix or {}, model=None, notes=notes,
+            min_turns=min_turns, unfit_reason="single_class",
         )
 
     fit_idx, hold_idx = split_by_task(task_ids, frac=fit_frac, seed=seed)
@@ -229,6 +270,7 @@ def fit_calibrator(
         return CalibrationResult(
             feature_order=feature_order, holdout={}, in_sample={}, reliability_bins=[],
             n_turns=len(y), n_tasks=n_tasks, label_mix=label_mix or {}, model=None, notes=notes,
+            min_turns=min_turns, unfit_reason="fit_error",
         )
 
     holdout = metrics(p_hold, y[hold_idx])
@@ -267,6 +309,7 @@ def fit_calibrator(
         label_mix=label_mix or {},
         model=shipped,
         notes=notes,
+        min_turns=min_turns,
     )
 
 

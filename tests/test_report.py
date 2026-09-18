@@ -85,6 +85,15 @@ def test_saving_fraction():
 # --------------------------------------------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def clean_tree(monkeypatch):
+    """Rows record the git state of whatever tree the tests run in, and a developer's tree is usually dirty. Pin
+    it clean so the `dirty_tree` warning appears only in the tests that ask for it."""
+    import agentdistill.provenance as prov
+
+    monkeypatch.setattr(prov, "git_state", lambda cwd=None: {"commit": "abc1234", "dirty": False})
+
+
 @pytest.fixture
 def cfg(project_config):
     project_config.eval.eval_set = "holdout"
@@ -184,13 +193,15 @@ def seed(registry, *, with_calibration=True, with_teacher=True, with_throughput=
 
 
 def test_a_complete_registry_assembles_without_warnings(registry, cfg):
-    r = assemble(seed(registry), cfg, tag_glob="gpu-day")
+    # Complete includes the quantized artifact: serving is configured quantized, so its absence is a warning.
+    r = assemble(seed(registry, with_quantized=True), cfg, tag_glob="gpu-day")
     assert set(r.subjects) >= {"base", "student", "teacher"}
     assert r.subjects["student"]["success"] == 0.68
     assert r.paired["student_vs_teacher"]["success"]["delta"] < 0
     assert r.calibration["holdout"]["auroc"] == 0.78
     assert r.cost["cascade"]["cost_per_task"] > 0
     assert r.warnings == [], r.warnings
+    assert r.warning_codes == []
 
 
 def test_every_subject_row_carries_its_run_id(registry, cfg):

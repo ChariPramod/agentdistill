@@ -21,3 +21,6 @@ adapters/
 
 # GPU-day and rehearsal stage logs.
 logs/
+
+# Hugging Face cache pinned by gpu_day.sh (HF_HOME).
+.cache/

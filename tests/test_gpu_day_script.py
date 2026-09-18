@@ -199,13 +199,23 @@ def test_the_teacher_stage_does_not_pin_a_local_backend():
     raise AssertionError("the script no longer evaluates the teacher")
 
 
-def test_tiny_mode_replays_the_recording_instead_of_calling_a_teacher():
-    """A rehearsal must not spend money. `recorded` is free and is literally what the teacher did -- which is
-    why it rehearses the stage without pretending to be a teacher baseline."""
+def test_tiny_mode_uses_the_replay_teacher_instead_of_calling_one():
+    """A rehearsal must not spend money, and must not skip the teacher either: a skipped teacher row is how the
+    cost block and the cascade went dark in the first rehearsal. Tiny mode evaluates `teacher` against the replay
+    stub its config declares, and the report discloses that the numbers are structural."""
+    from agentdistill.config import ProjectConfig
+
     text = SCRIPT.read_text()
-    assert 'TEACHER_SUBJECT="${TEACHER_SUBJECT:-recorded}"' in text
-    assert 'TEACHER_SUBJECT="${TEACHER_SUBJECT:-teacher}"' in text
-    assert "not a teacher baseline" in text
+    assert "recorded}" not in text
+    assert text.count('TEACHER_SUBJECT="${TEACHER_SUBJECT:-teacher}"') == 2
+    tiny = ProjectConfig.load(str(ROOT / "examples" / "support_agent" / "project.tiny.yaml"))
+    assert tiny.teacher is not None and tiny.teacher.backend == "replay"
+    assert tiny.teacher.input_per_mtok is not None, "the cost block needs a price, even a structural one"
+
+
+def test_tiny_mode_no_longer_skips_the_cascade():
+    body = SCRIPT.read_text().split("s_cascade_ver() {", 1)[1].split("\n}\n", 1)[0]
+    assert "TINY" not in body and "--verify-threshold" in body
 
 
 def test_every_flag_inside_a_command_substitution_exists():

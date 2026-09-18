@@ -37,6 +37,24 @@ console = Console()
 err = Console(stderr=True)
 
 
+def _stage(default_name: str, outcome: Any, allow_skip: bool = False) -> None:
+    """Report what a pipeline command wrote, and exit 3 if it wrote nothing it was not told to skip.
+
+    The stage name is the runner's (`AGENTDISTILL_STAGE`, set by gpu_day.sh) when there is one, so the log line
+    names the stage an operator is watching rather than the command it happens to call.
+    """
+    import os
+
+    from agentdistill.cli_stage import EXIT_EMPTY, StageEmpty, stage_guard
+
+    name = os.environ.get("AGENTDISTILL_STAGE") or default_name
+    try:
+        stage_guard(name, lambda: outcome, allow_skip=allow_skip)
+    except StageEmpty as e:
+        err.print(str(e), markup=False, highlight=False)
+        raise typer.Exit(code=EXIT_EMPTY) from e
+
+
 def _not_built(what: str, milestone: str) -> None:
     err.print(f"[yellow]{what} is not built yet[/yellow] — {milestone}.")
     err.print("The implementation plan's section 15 has the milestone order.")
@@ -45,9 +63,13 @@ def _not_built(what: str, milestone: str) -> None:
 
 def _load(config: str) -> Any:
     from agentdistill.config import ProjectConfig
+    from agentdistill.provenance import set_active_config
 
     try:
-        return ProjectConfig.load(config)
+        cfg = ProjectConfig.load(config)
+        # Every registry row this process writes records which config, at which hash, produced it.
+        set_active_config(config)
+        return cfg
     except FileNotFoundError as e:
         err.print(f"[red]{e}[/red]")
         raise typer.Exit(code=1) from e
@@ -95,6 +117,7 @@ def init(
     if p.exists() and not force:
         err.print(f"[red]{p} already exists[/red]; pass --force to overwrite.")
         raise typer.Exit(code=1)
+    p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(EXAMPLE_PROJECT_YAML.replace("name: support-agent", f"name: {name}"))
     console.print(f"[green]wrote[/green] {p}")
 
@@ -260,6 +283,12 @@ def curate(
     console.print(f"[green]curation report[/green] {report_path}")
     if built is not None:
         reg.set_dataset_report_path(built.dataset_id, str(report_path))
+        if result.centroids is not None and len(result.centroids):
+            from agentdistill.router.clusters import embedder_spec, save_cluster_model
+
+            model_id = save_cluster_model(reg, cfg.artifacts_dir, built.dataset_id, result.centroids,
+                                          embedder_spec(cfg.curate.embeddings, result.embedder_name))
+            console.print(f"[green]cluster model[/green] {model_id} (k={len(result.centroids)}), for the gateway")
 
 
 def _build_dataset(cfg, reg, result, ds_name, version, kind, base_model):
@@ -795,6 +824,7 @@ def train_onpolicy(
         rft_cap_per_task=op.rft_cap_per_task,
         min_pairs=op.min_pairs,
         max_fuzzy_share=op.max_fuzzy_share,
+        pair_cap_per_task=op.pair_cap_per_task,
     )
 
     # Teacher traces only: these become the `teacher_by_task` the round builds preference pairs against, and a
@@ -821,6 +851,7 @@ def train_onpolicy(
     stages = _onpolicy_stages(cfg, reg, tag, round_cfg, backend)
     teacher_by_task = {t.get("task_id") or t["id"]: t for t in train_traces}
 
+    before = reg.count_rounds()
     results = run_rounds(adapter, rounds, task_ids, teacher_by_task, current_eval["id"], stages, round_cfg)
     for r in results:
         _print_round(r)
@@ -830,13 +861,29 @@ def train_onpolicy(
     else:
         console.print("\n[yellow]no round was kept[/yellow]; the starting adapter is still the best you have")
 
+    from agentdistill.cli_stage import StageOutcome
+
+    # A discarded round is a result and writes a row. No row at all means the loop never recorded a decision.
+    written = reg.count_rounds() - before
+    _stage("train onpolicy", StageOutcome(
+        written > 0,
+        f"{written} round row(s), decisions {[r.decision for r in results]}" if written
+        else f"{len(results)} round(s) ran but no round row was recorded",
+    ))
+
 
 def _print_round(r) -> None:
     style = "green" if r.promoted else ("red" if r.decision == "error" else "yellow")
     console.print(f"\n[bold]round {r.round_idx}[/bold] from {r.start_adapter}")
     console.print(f"  rollouts    {r.n_rollouts}  (fuzzy share {r.fuzzy_share:.0%})")
     console.print(f"  RFT samples {r.n_rft}")
-    console.print(f"  pairs       {r.n_pairs}  {r.pair_kinds or ''}")
+    stats = r.pair_kinds or {}
+    if "max_per_task" in stats:
+        console.print(f"  pairs       {r.n_pairs}  (rollout {stats['n_rollout']}, teacher {stats['n_teacher']}; "
+                      f"max {stats['max_per_task']}/task of cap {stats['cap_per_task']}; "
+                      f"per-task histogram {stats['per_task_histogram']}; diff kinds {stats['diff_kind']})")
+    else:
+        console.print(f"  pairs       {r.n_pairs}  {stats}")
     if r.compare:
         s = r.compare.get("success") or {}
         lo, hi = s.get("ci95", (0, 0))
@@ -855,7 +902,6 @@ def _onpolicy_stages(cfg, reg, tag, round_cfg, backend: str = "hf"):
     """
     import uuid
 
-    from agentdistill.eval.rollouts import build_pairs as build_pairs_fn
     from agentdistill.eval.rollouts import build_rft as build_rft_fn
     from agentdistill.eval.rollouts import collect_rollouts
     from agentdistill.eval.runner import RunSpec, run_eval
@@ -905,24 +951,29 @@ def _onpolicy_stages(cfg, reg, tag, round_cfg, backend: str = "hf"):
         return result.dataset_id, len(registered)
 
     def _build_pairs(rollouts, teacher_by_task):
-        """Preference pairs, written as a real dataset, for the same reasons as `_build_rft`."""
+        """Preference pairs, capped per task and sampled, written as a real dataset for the same reasons as
+        `_build_rft`. The statistics travel back as the round's `pair_kinds` and land on the round row."""
         from agentdistill.data.pairs import write_pairs_dataset
         from agentdistill.eval.rollouts import RolloutSet
-        from agentdistill.train.dpo_data import balance_kinds, filter_pairs
+        from agentdistill.train.pairs import build_pairs as capped_pairs
 
         rs = state.get("rollouts") or RolloutSet(rollouts=rollouts)
-        pairs = build_pairs_fn(rs, list(teacher_by_task.values()))
-        usable, _ = filter_pairs(pairs)
-        balanced, kinds = balance_kinds(usable, max_teacher_ratio=round_cfg.max_teacher_ratio)
-        state["pairs"] = balanced
-        if not balanced:
-            return None, 0, kinds
+        by_task: dict[str, list[dict]] = {}
+        for r in rs.rollouts:
+            by_task.setdefault(r.get("task_id") or r["id"], []).append(r)
+        pairs, stats = capped_pairs(by_task, teacher_by_task, cap_per_task=round_cfg.pair_cap_per_task,
+                                    teacher_pair_ratio=round_cfg.max_teacher_ratio)
+        for w in stats["warnings"]:
+            console.print(f"[yellow]pairs:[/yellow] {w}")
+        state["pairs"] = pairs
+        if not pairs:
+            return None, 0, stats
 
         name = f"{cfg.name}-pairs"
         dataset_id = write_pairs_dataset(
-            balanced, cfg, reg, name=name, version=reg.next_dataset_version(name), tag=tag
+            pairs, cfg, reg, name=name, version=reg.next_dataset_version(name), tag=tag
         )
-        return dataset_id, len(balanced), kinds
+        return dataset_id, len(pairs), stats
 
     def _train_sft_continue(adapter, dataset_id):
         """One RFT epoch continuing from the round's starting adapter.
@@ -982,9 +1033,12 @@ def _onpolicy_stages(cfg, reg, tag, round_cfg, backend: str = "hf"):
             err.print(f"[red]no adapter {adapter!r} to merge[/red]")
             raise typer.Exit(code=1)
         out_dir = cfg.artifacts_dir / "merged" / f"{row['name']}-v{row['version']}"
+        from agentdistill.data.dataset import base_revision
+
+        base = cfg.resolve_model(row["base_model"])
         info = merge_and_verify(
-            cfg.resolve_model(row["base_model"]), row["path"], str(out_dir),
-            _verification_traces(reg, cfg, 200), _turn_client_factory(cfg, backend),
+            base, row["path"], str(out_dir),
+            _verification_traces(reg, cfg, 200), _turn_client_factory(cfg, backend), **base_revision(cfg, base),
         )
         return info["out_dir"]
 
@@ -1136,6 +1190,10 @@ def _resolve_client(
                 "Add one, or use `recorded` to replay the teacher's own recorded turns."
             )
             raise typer.Exit(code=1)
+        if backend == "replay":
+            from agentdistill.eval.fake_teacher import ReplayTeacherClient
+
+            return ReplayTeacherClient.from_registry(_registry(cfg))
         return _teacher_client(cfg, logprobs=logprobs)
 
     if cfg.train is None:
@@ -1164,15 +1222,15 @@ def _resolve_client(
             logprobs=logprobs, n_samples=samples,
         )
 
-    from agentdistill.data.dataset import load_tokenizer
+    from agentdistill.data.dataset import base_revision, load_tokenizer
 
-    tok = tok or load_tokenizer(base_model)
+    tok = tok or load_tokenizer(base_model, **base_revision(cfg, base_model))
     try:
         from transformers import AutoModelForCausalLM
     except ImportError as e:
         err.print("[red]the hf backend needs transformers; install `agentdistill[train]`[/red]")
         raise typer.Exit(code=1) from e
-    loaded: Any = AutoModelForCausalLM.from_pretrained(base_model)
+    loaded: Any = AutoModelForCausalLM.from_pretrained(base_model, **base_revision(cfg, base_model))
     if adapter_path:
         from peft import PeftModel
 
@@ -1186,7 +1244,7 @@ def eval_run(
     eval_set: str | None = typer.Option(None, help="Eval set name; defaults to eval.eval_set."),
     n: int | None = typer.Option(None, "--n", help="Repeats per task."),
     policy: str = typer.Option("strict", help="strict or fuzzy replay."),
-    backend: str = typer.Option("hf", help="hf, vllm, or http."),
+    backend: str = typer.Option("hf", help="hf, vllm, http, or replay (teacher only: the tiny-mode stub)."),
     max_turns: int = typer.Option(12),
     fuzzy_threshold: float = typer.Option(0.92),
     store_messages: bool = typer.Option(True, help="Keep full trajectories for hand review."),
@@ -1203,11 +1261,15 @@ def eval_run(
     config: str = typer.Option("project.yaml"),
 ) -> None:
     """Evaluate a subject on an eval set, replaying tool results from the recorded traces."""
+    from agentdistill.cli_stage import StageOutcome
     from agentdistill.eval.report import render_run
     from agentdistill.eval.runner import RunSpec, run_eval
 
     cfg = _load(config)
     reg = _registry(cfg)
+    if subject == "teacher" and cfg.eval.skip_teacher:
+        _stage("eval run", StageOutcome(False, "", skipped_reason="eval.skip_teacher set"), allow_skip=True)
+        return
     name = eval_set or cfg.eval.eval_set
     if not name:
         err.print("[red]no eval set[/red]; pass --eval-set or set eval.eval_set in project.yaml.")
@@ -1264,13 +1326,22 @@ def eval_run(
     run = reg.get_eval_run(run_id)
     console.print()
     console.print(render_run(run))
-    if verify_threshold:
-        _report_threshold_verification(reg, run, subject)
+    verified = _report_threshold_verification(reg, run, subject) if verify_threshold else None
     console.print()
     console.print(f"[dim]compare with: agentdistill eval compare {run_id[:10]} <other-run>[/dim]")
 
+    n_rows = len(reg.eval_results(run_id))
+    if not n_rows:
+        _stage("eval run", StageOutcome(False, f"run {run_id} on {name} stored no results for {subject}"))
+    if verify_threshold and verified is None:
+        _stage("eval run", StageOutcome(
+            False, f"run {run_id} measured no cascade point, so there is no verified threshold to report"
+        ))
+    _stage("eval run", StageOutcome(True, f"run {run_id} wrote {n_rows} rows"
+                                    + (f", verified threshold {verified['threshold']:.2f}" if verified else "")))
 
-def _report_threshold_verification(reg: Any, run: dict, subject: str) -> None:
+
+def _report_threshold_verification(reg: Any, run: dict, subject: str) -> dict | None:
     """Compare the escalation rate a cascade run actually produced against the rate its threshold predicted.
 
     The predicted rate comes from calibration data, where the student answered every turn. In a real cascade the
@@ -1286,25 +1357,44 @@ def _report_threshold_verification(reg: Any, run: dict, subject: str) -> None:
             "[yellow]--verify-threshold: this run recorded no escalation rate[/yellow], which means the "
             "subject was not a cascade. Verification needs a `cascade:<adapter>:<tau>` subject."
         )
-        return
+        return None
 
+    from agentdistill.registry.base import loads
+    from agentdistill.registry.lifecycle import adapter as get_adapter
     from agentdistill.registry.select import NoMatch, latest_calibration
 
-    adapter = subject.split(":")[1] if subject.startswith("cascade:") else subject
+    ref = subject.split(":")[1] if subject.startswith("cascade:") else subject
     try:
-        row = latest_calibration(reg, adapter_id=adapter)
+        row = latest_calibration(reg, adapter_id=get_adapter(reg, ref)["id"])
     except (NoMatch, LookupError):
         row = None
-    predicted = ((row or {}).get("report") or {}).get("predicted_escalation_rate")
+    if row is None:
+        console.print("[yellow]--verify-threshold: no calibration row to attach the measured point to[/yellow]")
+        return None
 
+    # The measured point is what the report's cascade section and cost block read. It is stored on the
+    # calibration it verifies, beside the analytic estimate it replaces.
+    point = {
+        "threshold": float(metrics.get("cascade_threshold") if metrics.get("cascade_threshold") is not None
+                           else row["threshold"]),
+        "success": metrics.get("success"),
+        "escalation_rate": measured,
+        "wasted_student_tokens": metrics.get("wasted_student_tokens_median", 0.0),
+        "run_id": run["id"],
+        "escalate_everything": row.get("verdict") != "usable",
+    }
+    reg.add_verified_point(row["id"], point)
+
+    predicted = (loads(row.get("report")) or {}).get("predicted_escalation_rate")
     console.print()
-    console.print(f"[bold]threshold verification[/bold]  measured escalation {measured:.1%}")
+    console.print(f"[bold]threshold verification[/bold]  measured escalation {measured:.1%}  "
+                  f"(recorded on {row['id']})")
     if predicted is None:
         console.print(
             "  [dim]no predicted rate on file to compare against; the calibration artifact did not record one."
             "[/dim]"
         )
-        return
+        return point
     drift = (measured - predicted) * 100
     console.print(f"  predicted {predicted:.1%}   drift {drift:+.1f} pp")
     if abs(drift) > 10:
@@ -1312,6 +1402,7 @@ def _report_threshold_verification(reg: Any, run: dict, subject: str) -> None:
             "  [yellow]the measured rate is far from the predicted one.[/yellow] The cost model should use "
             "the measured rate; the predicted one was computed on turns the student answered alone."
         )
+    return point
 
 
 def _run_recorded(reg, es, traces_by_task, grader, spec, store_messages, tick):
@@ -1357,7 +1448,6 @@ def eval_compare(
     """Paired statistical comparison of two eval runs."""
     from agentdistill.eval.report import render_comparison, render_run_markdown
     from agentdistill.eval.runner import compare
-    from agentdistill.eval.stats import TooFewTasks
 
     cfg = _load(config)
     reg = _registry(cfg)
@@ -1368,7 +1458,7 @@ def eval_compare(
         raise typer.Exit(code=1)
     try:
         result = compare(reg, a["id"], b["id"], alpha=alpha)
-    except (TooFewTasks, ValueError) as e:
+    except ValueError as e:
         err.print(f"[red]{e}[/red]")
         raise typer.Exit(code=1) from e
 
@@ -1523,10 +1613,12 @@ def calibrate(
     """
     import numpy as np
 
-    from agentdistill.cascade.calibrate import fit_calibrator, save
+    from agentdistill.cascade.calibrate import fit_calibrator, gate_verdict, save
     from agentdistill.cascade.features import matrix
     from agentdistill.cascade.labels import attach_features, label_rollouts
     from agentdistill.cascade.threshold import choose_threshold, verification_points
+    from agentdistill.cli_stage import StageOutcome
+    from agentdistill.registry.lifecycle import adapter as get_adapter
 
     cfg = _load(config)
     reg = _registry(cfg)
@@ -1549,11 +1641,10 @@ def calibrate(
         for r in rows if r.get("messages")
     ]
     if not rollouts:
-        err.print(
-            "[red]that eval run stored no trajectories[/red], so there are no turns to label. "
-            "Re-run it without --no-store-messages."
-        )
-        raise typer.Exit(code=1)
+        _stage("calibrate", StageOutcome(
+            False, "that eval run stored no trajectories, so there are no turns to label. "
+                   "Re-run it without --no-store-messages."
+        ))
 
     teacher_by_task = {}
     for trace_id in reg.get_eval_set(run["eval_set_id"].removeprefix("es_"))["trace_ids"] \
@@ -1573,12 +1664,10 @@ def calibrate(
     # Without stored logprobs there are no confidence features to fit on.
     attached = attach_features(records)
     if not attached:
-        err.print(
-            "[red]no per-turn logprobs in that eval run[/red]. The gate's features come from "
-            "`eval run <adapter> --logprobs --samples 3`. "
-            "See scripts/gpu_day.sh, stage `logprobs`."
-        )
-        raise typer.Exit(code=1)
+        _stage("calibrate", StageOutcome(
+            False, "no per-turn logprobs in that eval run. The gate's features come from "
+                   "`eval run <adapter> --logprobs --samples 3`; see scripts/gpu_day.sh, stage `logprobs`."
+        ))
 
     # Turns without logprobs are dropped rather than given a vector of NaN: a row that is entirely missing
     # teaches the calibrator nothing and dilutes every metric computed over it.
@@ -1590,14 +1679,24 @@ def calibrate(
         )
     records = scorable
 
+    min_turns = cfg.cascade.min_turns
+    if len(records) < min_turns:
+        _stage("calibrate", StageOutcome(
+            False, f"{len(records)} labelled turns with logprobs, below cascade.min_turns={min_turns}; "
+                   f"a gate fitted on fewer is noise. Record more with `eval run --logprobs` on a larger set."
+        ))
+
     features = [r["features"] for r in records]
     y = np.array([int(r["good"]) for r in records])
     task_ids = [r["task_id"] for r in records]
     names = list(cfg.cascade.features)
-    result = fit_calibrator(matrix(features, names), y, task_ids, names, label_mix=label_stats["mix"])
+    result = fit_calibrator(matrix(features, names), y, task_ids, names, label_mix=label_stats["mix"],
+                            min_turns=min_turns)
 
     for note in result.notes:
         console.print(f"[yellow]note:[/yellow] {note}")
+    if result.model is None and result.unfit_reason != "single_class":
+        _stage("calibrate", StageOutcome(False, "no gate could be fitted: " + "; ".join(result.notes)))
     if result.holdout:
         h = result.holdout
         console.print(
@@ -1606,32 +1705,72 @@ def calibrate(
         )
         console.print(f"in-sample AUROC {result.in_sample.get('auroc', float('nan')):.3f} [dim](optimistic)[/dim]")
 
+    try:
+        adapter_row = get_adapter(reg, adapter)
+    except LookupError as e:
+        err.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+
     path = Path(out) if out else cfg.artifacts_dir / "calibration" / f"{adapter}"
     save(result, path)
     console.print(f"[green]wrote[/green] {path}")
 
-    if not result.usable:
-        console.print("[yellow]gate not usable; the cascade will escalate everything and the report says so.[/yellow]")
-        return
+    # The threshold search runs whatever the gate's quality, so its code path executes on every calibration and
+    # its conclusion is on the row. Whether the threshold is *used* is the verdict's call, not this search's.
+    budget = max_drop_pp if max_drop_pp is not None else cfg.cascade.max_success_drop_pp
+    if result.model is not None:
+        # Scored on the columns the model was fitted on, which may be fewer than configured: fitting drops
+        # features no turn had a value for (`agreement` whenever k_samples is 0).
+        p = result.model.predict_proba(matrix(features, result.feature_order))[:, 1]
+    else:
+        # Single-class labels: no model, so every turn scores the base rate and the search finds what a
+        # constant gate can do, which is nothing.
+        p = np.full(len(y), float(y.mean()))
+    choice = choose_threshold(p, y.astype(bool), np.array(task_ids), dict.fromkeys(set(task_ids), True),
+                              max_success_drop_pp=budget)
+    verdict = gate_verdict(result, choice.chosen is not None)
+    use = verdict == "usable" and choice.chosen is not None
+    cal_id = reg.insert_calibration({
+        "adapter_id": adapter_row["id"],
+        "eval_run_id": run["id"],
+        "feature_order": result.feature_order,
+        "model_path": str(path),
+        # 1.0 keeps the student only at certainty, which is escalate-everything in practice; the verdict is
+        # what actually stops a non-usable gate from being loaded.
+        "threshold": choice.chosen.threshold if use else 1.0,
+        "target": {"max_success_drop_pp": budget},
+        "escalation_rate": choice.chosen.escalation_rate if use else 1.0,
+        "holdout_metrics": result.holdout,
+        "reliability_bins": result.reliability_bins,
+        "verdict": verdict,
+        "report": {
+            "predicted_escalation_rate": choice.chosen.escalation_rate if use else 1.0,
+            "threshold_note": choice.note,
+            "notes": result.notes,
+            "n_turns": result.n_turns,
+            "n_tasks": result.n_tasks,
+            "min_turns": min_turns,
+            "in_sample_metrics": result.in_sample,
+        },
+    })
 
-    p = result.model.predict_proba(matrix(features, names))[:, 1]
-    choice = choose_threshold(
-        p, y.astype(bool), np.array(task_ids), dict.fromkeys(set(task_ids), True),
-        max_success_drop_pp=max_drop_pp if max_drop_pp is not None else cfg.cascade.max_success_drop_pp,
-    )
-    if choice.chosen is None:
-        console.print(f"[yellow]{choice.note}[/yellow]")
-        return
-    console.print(
-        f"threshold {choice.chosen.threshold:.2f}  escalation {choice.chosen.escalation_rate:.0%}  "
-        f"estimated success {choice.chosen.cascade_success:.1%}"
-    )
-    console.print(
-        "  [dim]analytic estimate; it assumes an escalated turn is as good as the teacher's, which is optimistic "
-        "because the teacher answers on a prefix the student built. Verify with "
-        f"`eval run cascade:{adapter}:auto --verify-threshold` at {verification_points(choice.chosen.threshold)}."
-        "[/dim]"
-    )
+    if not use:
+        why = choice.note or "; ".join(result.notes) or f"verdict {verdict}"
+        console.print(f"[yellow]gate verdict: {verdict}.[/yellow] The cascade escalates every turn and the "
+                      f"report says so. ({why})")
+    else:
+        console.print(
+            f"threshold {choice.chosen.threshold:.2f}  escalation {choice.chosen.escalation_rate:.0%}  "
+            f"estimated success {choice.chosen.cascade_success:.1%}"
+        )
+        console.print(
+            "  [dim]analytic estimate; it assumes an escalated turn is as good as the teacher's, which is "
+            "optimistic because the teacher answers on a prefix the student built. Verify with "
+            f"`eval run cascade:{adapter}:auto --verify-threshold` at "
+            f"{verification_points(choice.chosen.threshold)}.[/dim]"
+        )
+    _stage("calibrate", StageOutcome(True, f"calibration {cal_id} for {adapter_row['name']}, verdict {verdict}, "
+                                           f"{result.n_turns} turns"))
 
 
 @adapter_app.command("merge")
@@ -1670,9 +1809,11 @@ def adapter_merge(
 
     console.print(f"Merging {row['name']} v{row['version']} into {row['base_model']} → {out_dir}")
     try:
+        from agentdistill.data.dataset import base_revision
+
+        base = cfg.resolve_model(row["base_model"])
         info = merge_and_verify(
-            cfg.resolve_model(row["base_model"]), row["path"], str(out_dir), traces,
-            _turn_client_factory(cfg, backend)
+            base, row["path"], str(out_dir), traces, _turn_client_factory(cfg, backend), **base_revision(cfg, base)
         )
     except MergeVerificationFailed as e:
         err.print(f"[red]merge verification failed[/red]: {e}")
@@ -1760,6 +1901,15 @@ def adapter_quantize(
         f"  [dim]Next: `agentdistill eval run student:{row['name']}-{method}` and compare against the "
         f"unquantized adapter. Quantization may cost at most 2 pp of success.[/dim]"
     )
+
+    from agentdistill.cli_stage import StageOutcome
+
+    try:
+        get_adapter(reg, quantized_id)
+        outcome = StageOutcome(True, f"{method} artifact {quantized_id} registered from {row['name']}")
+    except LookupError:
+        outcome = StageOutcome(False, f"{method} ran but {quantized_id} is not in the registry")
+    _stage("adapter quantize", outcome)
 
 
 def _verification_traces(registry: Any, cfg: Any, max_turns: int) -> list[dict]:
@@ -1870,6 +2020,10 @@ def _teacher_client(cfg: Any, logprobs: bool = False) -> Any:
     """
     from agentdistill.eval.clients import LiteLLMTurnClient
 
+    if cfg.teacher.backend == "replay":
+        from agentdistill.eval.fake_teacher import ReplayTeacherClient
+
+        return ReplayTeacherClient.from_registry(_registry(cfg))
     return LiteLLMTurnClient(cfg.teacher.model, logprobs=logprobs)
 
 
@@ -1894,12 +2048,12 @@ def _turn_client_factory(cfg: Any, backend: str = "vllm") -> Any:
         if backend == "vllm":
             return VllmOfflineTurnClient(base_model, None, parser_name, family, lora_path=lora_path)
 
-        from agentdistill.data.dataset import load_tokenizer
+        from agentdistill.data.dataset import base_revision, load_tokenizer
 
-        tok = load_tokenizer(base_model)
+        tok = load_tokenizer(base_model, **base_revision(cfg, base_model))
         from transformers import AutoModelForCausalLM
 
-        loaded: Any = AutoModelForCausalLM.from_pretrained(base_model)
+        loaded: Any = AutoModelForCausalLM.from_pretrained(base_model, **base_revision(cfg, base_model))
         if lora_path:
             from peft import PeftModel
 
@@ -2100,12 +2254,27 @@ def report(
         target = Path(out) if out else cfg.reports_dir / "report.html"
         write_html(data, target)
 
+    # The data every renderer read, next to what they wrote, so `assert_report` checks data rather than parsing
+    # HTML. Written before the stage guard: an empty report's sidecar is exactly what the assertion needs to see.
+    sidecar = target.parent / "report.json"
+    sidecar.write_text(json.dumps(data.to_dict(), sort_keys=True, indent=2, default=str))
+
     console.print(results_block(data))
-    console.print(f"\n[green]wrote[/green] {target}")
+    console.print(f"\n[green]wrote[/green] {target} and {sidecar}")
     if data.warnings:
         console.print(
             f"[yellow]{len(data.warnings)} warning(s)[/yellow]; the report says which claims could not be made."
         )
+
+    from agentdistill.cli_stage import StageOutcome
+
+    # The file is written either way: a report explaining why it is empty is more use than none. But a report
+    # with no subjects at all is a pipeline that produced nothing, and the stage says so.
+    _stage("report", StageOutcome(
+        bool(data.subjects),
+        f"{target} with subjects {sorted(data.subjects)}" if data.subjects
+        else f"{target} has no subjects: no eval run matched eval set {data.eval_set!r}",
+    ))
 
 
 @app.command()

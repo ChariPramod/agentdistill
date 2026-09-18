@@ -128,6 +128,8 @@ def pairs_against_teacher(student_rollouts: list[dict], teacher_traces: list[dic
         pair = first_divergent_pair(teacher, roll)
         if pair is not None:
             pair["source"] = "on_policy_vs_teacher"
+            # Without this, `balance_kinds` files a teacher pair as a rollout pair and the teacher cap never bites.
+            pair["pair_kind"] = "teacher"
             out.append(pair)
     return out
 

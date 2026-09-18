@@ -134,7 +134,15 @@ agentdistill eval compare <run_a> <run_b>
 Positive deltas favour `run_a`. The report gives success with a 95% interval and McNemar, tokens and turns with
 Wilcoxon, all Holm-corrected, plus schema validity, divergence rate, and the weakest clusters.
 
-Three choices worth knowing about:
+Four choices worth knowing about:
+
+**Below the floor there are no statistics.** Fewer than 20 shared tasks or fewer than 3 repeats per task, and
+`compare` returns an `insufficient_power` marker with the reason and the raw observed rates, not a delta, an
+interval or a p-value. So does a comparison where every task came out the same under both subjects: its
+interval has zero width, which is not a precise measurement of no difference. Every renderer prints the reason
+instead of a result, and every promotion gate (lifecycle, retrain, on-policy) treats the marker as a failure,
+because parity that was never measured is not parity. `eval compare` still exits 0: a comparison that cannot
+be made is not an error.
 
 **Intervals resample tasks, not rows.** 40 tasks run 5 times is 200 rows and nowhere near 200 independent
 observations — repeats of one task are highly correlated. Resampling rows would report an interval several times
