@@ -121,3 +121,13 @@ def test_gateway_boots_on_an_empty_registry(project_config, registry):
     assert state.canary_adapter is None
     assert state.notes, "an empty registry is a degraded state and /healthz should say so"
     assert any("no adapter is in prod" in n for n in state.notes)
+
+
+def test_a_fresh_clone_rebuilds_the_gitignored_corpus():
+    """The corpus is generated and gitignored, so tiny setup must rebuild it; the first fresh-clone rehearsal died
+    on a missing eval-holdout.jsonl. The recipe must also be the only one documented."""
+    root = Path(__file__).resolve().parents[1]
+    assert "bash scripts/make_corpus.sh" in (root / "scripts" / "tiny_setup.sh").read_text()
+    recipe = (root / "scripts" / "make_corpus.sh").read_text()
+    assert "--n 800 --seed 7" in recipe
+    assert "scripts/make_corpus.sh" in (root / "examples" / "support_agent" / "README.md").read_text()

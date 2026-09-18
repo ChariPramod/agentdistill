@@ -17,6 +17,10 @@ AD="${AGENTDISTILL:-agentdistill}"
 N_TASKS="${TINY_TASKS:-10}"
 N_CALIB="${TINY_CALIB_TASKS:-20}"
 
+echo "==> corpus"
+# Gitignored and generated; a fresh clone has none until this runs.
+bash scripts/make_corpus.sh
+
 echo "==> tiny model"
 python scripts/make_tiny_model.py --out artifacts/tiny/model
 

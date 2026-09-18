@@ -4,9 +4,7 @@ Runs the whole implemented pipeline offline — no GPU, no API key, no network.
 
 ```bash
 # from the repo root
-python -m examples.support_agent.record --scripted --error-rate 0.25 --n 260 --seed 7 \
-  --out examples/support_agent/traces.jsonl
-python examples/support_agent/split_corpus.py
+bash scripts/make_corpus.sh   # records 800 tasks with the scripted teacher, then splits; deterministic
 
 cd examples/support_agent
 agentdistill ingest jsonl traces-train.jsonl --config project.yaml
