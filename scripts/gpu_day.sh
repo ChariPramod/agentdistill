@@ -53,6 +53,9 @@ CALIB_SET="${CALIB_SET:-support-calib-v1}"
 N_EVAL="${N_EVAL:-5}"
 TEACHER_SUBJECT="${TEACHER_SUBJECT:-teacher}"
 SAMPLES="${SAMPLES:-3}"
+# Student evals run lockstep at this batch size, so throughput -- and the cost per token built on it -- is a
+# serving figure. Only vLLM batches; tiny mode's hf client falls back and the report says unbatched.
+BATCH="${BATCH:-32}"
 BACKEND="${AGENTDISTILL_EVAL_BACKEND:-vllm}"
 TINY="${AGENTDISTILL_TINY:-0}"
 
@@ -126,8 +129,8 @@ s_merge()       { ad adapter merge "$(cap adapter adapter latest --tag "$TAG" "$
 # fp8 writes a marker and nothing else, so quantize runs unchanged on a laptop. AWQ does not, and tiny mode
 # configures fp8 rather than skipping the stage -- a skipped stage rehearses nothing.
 
-s_eval_base()   { ad eval run base --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --tag "$TAG" "${CONFIG_ARG[@]}"; }
-s_eval_sft()    { ad eval run "$(cap adapter adapter latest --tag "$TAG" "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --tag "$TAG" "${CONFIG_ARG[@]}"; }
+s_eval_base()   { ad eval run base --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --batch "$BATCH" --tag "$TAG" "${CONFIG_ARG[@]}"; }
+s_eval_sft()    { ad eval run "$(cap adapter adapter latest --tag "$TAG" "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --batch "$BATCH" --tag "$TAG" "${CONFIG_ARG[@]}"; }
 s_eval_teach()  { ad eval run "$TEACHER_SUBJECT" --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --tag "$TAG" "${CONFIG_ARG[@]}"; }
 # Both sides by subject. `eval latest --tag` returned whichever tagged run was newest -- the teacher's, once the
 # teacher row existed -- and the stage compared the teacher against base under the name cmp_sft.
@@ -136,16 +139,17 @@ s_cmp_sft()     { ad eval compare "$(cap ev eval latest --subject "$(cap adapter
 s_onpolicy()    { ad train onpolicy "$(cap adapter adapter latest --tag "$TAG" "${CONFIG_ARG[@]}")" --rounds 1 --backend "$BACKEND" --tag "$TAG-r1" "${CONFIG_ARG[@]}"; }
 s_eval_r1() {
   # A discarded on-policy round is a result, recorded on its round row with the reason; it just leaves no
-  # candidate to evaluate. That is the one case this stage skips, and it says so in the stage's SKIPPED format.
-  local r1=""
+  # candidate to evaluate. That is the one case this stage skips, and the skip cites the row that decided it.
+  local r1="" round=""
   if [[ "$DRY" != "1" ]]; then r1="$(agentdistill adapter latest --tag "$TAG-r1" "${CONFIG_ARG[@]}" 2>/dev/null || true)"; fi
   if [[ "$DRY" != "1" && -z "$r1" ]]; then
-    echo "[stage eval_r1] SKIPPED: the on-policy round kept no candidate (its round row records why)"
+    round="$(agentdistill train latest-round --tag "$TAG-r1" "${CONFIG_ARG[@]}")"
+    echo "[stage eval_r1] SKIPPED: round ${round%% *} decided ${round#* } -- no candidate to evaluate"
     return 0
   fi
-  ad eval run "$(cap adapter adapter latest --tag "$TAG-r1" "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --tag "$TAG-r1" "${CONFIG_ARG[@]}"
+  ad eval run "$(cap adapter adapter latest --tag "$TAG-r1" "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --batch "$BATCH" --tag "$TAG-r1" "${CONFIG_ARG[@]}"
 }
-s_unseen()      { ad eval run "$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}")" --eval-set "$UNSEEN_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --tag "$TAG" "${CONFIG_ARG[@]}"; }
+s_unseen()      { ad eval run "$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}")" --eval-set "$UNSEEN_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --batch "$BATCH" --tag "$TAG" "${CONFIG_ARG[@]}"; }
 
 s_logprobs()    { ad eval run "$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}")" --eval-set "$CALIB_SET" --n 3 --policy fuzzy --backend "$BACKEND" --logprobs --samples "$SAMPLES" --tag "$TAG-calib" "${CONFIG_ARG[@]}"; }
 s_calibrate()   { ad calibrate "$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}")" --from-eval "$(cap ev eval latest --eval-set "$CALIB_SET" "${CONFIG_ARG[@]}")" "${CONFIG_ARG[@]}"; }
@@ -156,7 +160,7 @@ s_cascade_ver() {
 }
 
 s_quantize()    { ad adapter quantize "$(cap adapter adapter best --tag "$TAG*" "${CONFIG_ARG[@]}")" --method "$QUANT" "${CONFIG_ARG[@]}"; }
-s_eval_quant()  { ad eval run "$(cap adapter adapter latest --quantized "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" --n 3 --policy strict --backend "$BACKEND" --tag "$TAG" "${CONFIG_ARG[@]}"; }
+s_eval_quant()  { ad eval run "$(cap adapter adapter latest --quantized "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" --n 3 --policy strict --backend "$BACKEND" --batch "$BATCH" --tag "$TAG" "${CONFIG_ARG[@]}"; }
 s_serve_smoke() {
   if [[ "$DRY" == "1" ]]; then echo "bash scripts/serve_smoke.sh"; return 0; fi
   if [[ "$TINY" == "1" ]]; then

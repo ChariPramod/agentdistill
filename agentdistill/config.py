@@ -259,6 +259,9 @@ class EvalConfig(StrictModel):
     policy: Literal["strict", "fuzzy"] = "strict"
     grader: GraderConfig = Field(default_factory=GraderConfig)
     max_turns: int = Field(40, ge=1)
+    #: The calibration eval set: disjoint from training and from `eval_set`, used only to fit the confidence gate.
+    #: The retrain loop evaluates the candidate on it with logprobs and calibrates from that run.
+    calib_set: str | None = None
     #: Declare that the teacher is not evaluated this run. The only way `eval run teacher` may write no row and
     #: still pass; the report prints it as a skip, distinct from a teacher run that is simply missing.
     skip_teacher: bool = False

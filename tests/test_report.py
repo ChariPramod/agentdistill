@@ -161,8 +161,8 @@ def seed(registry, *, with_calibration=True, with_teacher=True, with_throughput=
                                                    "1": {"n_tasks": 10, "success": max(success - 0.3, 0.0)}})
 
     add_run("ev_base", "base", 0.40, tokens=180)
-    student_extra = {"throughput_tok_per_s": 1800.0, "throughput_conditions": "batched, max_num_seqs=64"} \
-        if with_throughput else {}
+    student_extra = {"throughput_tok_per_s": 1800.0, "throughput_conditions": "batched, max_num_seqs=64",
+                     "throughput_mode": "batched"} if with_throughput else {}
     add_run("ev_student", "ad1", 0.68, student_extra, tokens=150)
     if with_teacher:
         add_run("ev_teacher", "teacher", 0.84,

@@ -551,6 +551,45 @@ def eval_latest(
     print(row["id"])
 
 
+pricing_app = typer.Typer(no_args_is_help=True, help="Model prices the cost report reads.")
+app.add_typer(pricing_app, name="pricing")
+
+
+@pricing_app.command("set")
+def pricing_set(
+    model: str = typer.Argument(..., help="Model id as the teacher config spells it."),
+    provider: str = typer.Option(..., help="Provider, e.g. anthropic."),
+    input_per_mtok: float = typer.Option(..., "--input", help="USD per million input tokens."),
+    output_per_mtok: float = typer.Option(..., "--output", help="USD per million output tokens."),
+    cache_read_per_mtok: float | None = typer.Option(None, "--cache-read", help="USD per million cached input."),
+    effective_from: str | None = typer.Option(None, help="ISO date the price took effect. Defaults to today."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Record a model's price, so the cost report prices a run from a row rather than from a guess."""
+    reg = _registry(_load(config))
+    at = reg.set_pricing(provider, model, input_per_mtok, output_per_mtok, cache_read_per_mtok, effective_from)
+    console.print(f"[green]priced[/green] {provider}/{model} from {at}: "
+                  f"${input_per_mtok}/Mtok in, ${output_per_mtok}/Mtok out"
+                  + (f", ${cache_read_per_mtok}/Mtok cached" if cache_read_per_mtok is not None else ""))
+
+
+@pricing_app.command("list")
+def pricing_list(config: str = typer.Option("project.yaml")) -> None:
+    """Every price on file, newest first."""
+    rows = _registry(_load(config)).list_pricing()
+    if not rows:
+        console.print("no prices on file; `agentdistill pricing set` records one")
+        return
+    table = Table(box=None)
+    for col in ("provider", "model", "in $/Mtok", "out $/Mtok", "cached $/Mtok", "from"):
+        table.add_column(col)
+    for r in rows:
+        table.add_row(r["provider"], r["model"], str(r["input_per_mtok"]), str(r["output_per_mtok"]),
+                      str(r["cache_read_per_mtok"] if r["cache_read_per_mtok"] is not None else "-"),
+                      r["effective_from"])
+    console.print(table)
+
+
 @app.command("config")
 def config_cmd(
     action: str = typer.Argument(..., help="Only 'get' is supported."),
@@ -707,7 +746,13 @@ def train_sft_cmd(
         dataset_path, dataset_id = str(path), None
 
     try:
-        from agentdistill.train.sft import NoSuchBaseModel, TrainingUnavailable, train_sft
+        from agentdistill.train.sft import (
+            NoSuchBaseModel,
+            TokenizerMismatch,
+            TrainingUnavailable,
+            check_dataset_tokenizer,
+            train_sft,
+        )
     except ImportError as e:  # pragma: no cover
         err.print(f"[red]{e}[/red]")
         raise typer.Exit(code=1) from e
@@ -736,6 +781,16 @@ def train_sft_cmd(
                 "start near a good solution; a fresh-run rate walks out of it. --lr-scale 0.333 is the retrain "
                 "loop's default."
             )
+
+    # Before any row is written: a dataset tokenized for another base model trains without complaint and produces
+    # an adapter that looks normal. Rebuilding after a base-model pin is the step this catches being forgotten.
+    try:
+        for warning in check_dataset_tokenizer(train_cfg, dataset_path):
+            console.print(f"[yellow]{warning}[/yellow]")
+    except TokenizerMismatch as e:
+        from agentdistill.cli_stage import StageOutcome
+
+        _stage("train sft", StageOutcome(False, str(e)))
 
     adapter_name = name or cfg.name
     version = reg.next_adapter_version(adapter_name)
@@ -795,6 +850,26 @@ def adapter_list(config: str = typer.Option("project.yaml")) -> None:
     for r in rows:
         table.add_row(r["name"], str(r["version"]), r["status"], r["base_model"], r["path"])
     console.print(table)
+
+
+@train_app.command("latest-round")
+def train_latest_round(
+    tag: str = typer.Option(..., help="The round's tag, e.g. gpu-day-r1."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Print the newest on-policy round for a tag as `<id> <decision> <reason>` on one line.
+
+    For scripts that skip a stage on a recorded decision: the skip line cites this, so it can never be mistaken
+    for a silent pass.
+    """
+    from agentdistill.registry.select import rounds_for_tag
+
+    rows = rounds_for_tag(_registry(_load(config)), tag)
+    if not rows:
+        err.print(f"[red]no on-policy round with tag {tag!r}[/red]")
+        raise typer.Exit(code=1)
+    r = max(rows, key=lambda row: (row.get("started_at") or "", row["round_idx"]))
+    typer.echo(f"{r['id']} {r.get('decision') or 'undecided'} {' '.join((r.get('reason') or '').split())}")
 
 
 @train_app.command("onpolicy")
@@ -1258,6 +1333,11 @@ def eval_run(
         False, help="For a cascade subject: measure the escalation rate the chosen threshold actually produces."
     ),
     tag: str | None = typer.Option(None, help="Group this run with a session, so `eval latest --tag` finds it."),
+    batch: int | None = typer.Option(
+        None, "--batch", min=1,
+        help="Lockstep batch size. Only a client that batches (vLLM) is batched; others run sequentially and "
+             "the run records its throughput as unbatched.",
+    ),
     config: str = typer.Option("project.yaml"),
 ) -> None:
     """Evaluate a subject on an eval set, replaying tool results from the recorded traces."""
@@ -1321,7 +1401,7 @@ def eval_run(
             run_id = _run_recorded(reg, es, traces_by_task, grader, spec, store_messages, tick)
         else:
             run_id = run_eval(reg, es, traces_by_task, client, grader, spec,
-                              store_messages=store_messages, progress=tick)
+                              store_messages=store_messages, progress=tick, batch_size=batch)
 
     run = reg.get_eval_run(run_id)
     console.print()
@@ -1699,11 +1779,14 @@ def calibrate(
         _stage("calibrate", StageOutcome(False, "no gate could be fitted: " + "; ".join(result.notes)))
     if result.holdout:
         h = result.holdout
-        console.print(
-            f"holdout  AUROC {h.get('auroc', float('nan')):.3f}  Brier {h.get('brier', float('nan')):.3f}  "
-            f"ECE {h.get('ece', float('nan')):.3f}  (n={h.get('n')})"
-        )
-        console.print(f"in-sample AUROC {result.in_sample.get('auroc', float('nan')):.3f} [dim](optimistic)[/dim]")
+
+        def f3(x: float | None) -> str:
+            return "undefined" if x is None or x != x else f"{x:.3f}"
+
+        console.print(f"holdout  AUROC {f3(h.get('auroc'))}  Brier {f3(h.get('brier'))}  ECE {f3(h.get('ece'))}  "
+                      f"(n={h.get('n')})")
+        if result.in_sample:
+            console.print(f"in-sample AUROC {f3(result.in_sample.get('auroc'))} [dim](optimistic)[/dim]")
 
     try:
         adapter_row = get_adapter(reg, adapter)
@@ -1728,7 +1811,7 @@ def calibrate(
         p = np.full(len(y), float(y.mean()))
     choice = choose_threshold(p, y.astype(bool), np.array(task_ids), dict.fromkeys(set(task_ids), True),
                               max_success_drop_pp=budget)
-    verdict = gate_verdict(result, choice.chosen is not None)
+    verdict, verdict_reason = gate_verdict(result, int(y.sum()), choice.chosen is not None)
     use = verdict == "usable" and choice.chosen is not None
     cal_id = reg.insert_calibration({
         "adapter_id": adapter_row["id"],
@@ -1745,6 +1828,7 @@ def calibrate(
         "verdict": verdict,
         "report": {
             "predicted_escalation_rate": choice.chosen.escalation_rate if use else 1.0,
+            "verdict_reason": verdict_reason,
             "threshold_note": choice.note,
             "notes": result.notes,
             "n_turns": result.n_turns,
@@ -1755,7 +1839,7 @@ def calibrate(
     })
 
     if not use:
-        why = choice.note or "; ".join(result.notes) or f"verdict {verdict}"
+        why = verdict_reason if verdict != "no_threshold" else (choice.note or verdict_reason)
         console.print(f"[yellow]gate verdict: {verdict}.[/yellow] The cascade escalates every turn and the "
                       f"report says so. ({why})")
     else:

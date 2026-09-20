@@ -293,8 +293,8 @@ def test_an_uninformative_gate_still_writes_a_row_with_that_verdict(project, syn
 
 
 def test_single_class_labels_are_a_measurement_not_a_hole(project, synthetic_labels):
-    """Every turn wrong -- what a random tiny model produces -- is the gate being unable to discriminate
-    anything. That is recorded as `uninformative`, not treated as a stage that wrote nothing."""
+    """Every turn wrong -- what a random tiny model produces -- is a finding about the data. It is recorded as
+    `degenerate_labels`, not treated as a stage that wrote nothing."""
     synthetic_labels["all_bad"] = True
     run_id = _seed_logprob_run(n_tasks=40, turns_per_task=6)
     result = runner.invoke(app, ["calibrate", "student", "--from-eval", run_id])
@@ -303,7 +303,9 @@ def test_single_class_labels_are_a_measurement_not_a_hole(project, synthetic_lab
     from agentdistill.report.registry_views import calibration_for
 
     row = calibration_for(_registry(), "ad1")
-    assert row["verdict"] == "uninformative"
+    assert row["verdict"] == "degenerate_labels"
+    assert row["holdout_metrics"]["auroc"] is None, "recorded as None, never NaN or 0.5"
+    assert "every one of 240 labelled turns is bad" in row["report"]["verdict_reason"]
     assert row["holdout_metrics"]["n"] == 240 and row["holdout_metrics"]["positive_rate"] == 0.0
     assert row["threshold"] == 1.0
 
@@ -318,12 +320,29 @@ def test_gate_verdict_thresholds():
         return CalibrationResult(feature_order=["x"], holdout={"auroc": auroc, "ece": ece}, in_sample={},
                                  reliability_bins=[], n_turns=n, n_tasks=10)
 
-    assert gate_verdict(result(0.52), True) == "uninformative"
-    assert gate_verdict(result(float("nan")), True) == "uninformative"
-    assert gate_verdict(result(0.58), True) == "unreliable", "above chance but below the useful floor"
-    assert gate_verdict(result(0.8, ece=0.2), True) == "unreliable"
-    assert gate_verdict(result(0.8), False) == "no_threshold"
-    assert gate_verdict(result(0.8), True) == "usable"
+    def verdict(r, positives=200, chosen=True):
+        return gate_verdict(r, positives, chosen)[0]
+
+    assert verdict(result(0.52)) == "uninformative"
+    assert verdict(result(float("nan"))) == "unreliable", "an AUROC that could not be computed is not chance"
+    assert verdict(result(0.58)) == "unreliable", "above chance but below the useful floor"
+    assert verdict(result(0.8, ece=0.2)) == "unreliable"
+    assert verdict(result(0.8), chosen=False) == "no_threshold"
+    assert verdict(result(0.8)) == "usable"
+    assert verdict(result(0.8, n=50)) == "unreliable", "below min_turns"
+
+
+def test_degenerate_labels_are_not_uninformative():
+    """Every label the same is a data problem (the tasks did not separate); uninformative is a feature problem.
+    The fixes differ, so the verdicts do."""
+    from agentdistill.cascade.calibrate import verdict_for
+
+    verdict, reason = verdict_for(n_turns=60, n_positive=0, auroc=None, ece=None, min_turns=20)
+    assert verdict == "degenerate_labels"
+    assert "every one of 60 labelled turns is bad" in reason
+    assert verdict_for(60, 60, None, None, 20)[0] == "degenerate_labels"
+    assert "is good" in verdict_for(60, 60, None, None, 20)[1]
+    assert verdict_for(60, 30, 0.51, 0.02, 20) == ("uninformative", "holdout AUROC 0.510 below 0.55")
 
 
 def _calibration_row(registry, verdict: str, tmp_path: Path) -> str:

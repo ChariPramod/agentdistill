@@ -13,10 +13,11 @@ from typing import Any
 
 
 def render(tok: Any, messages: list[dict], tools: list[dict] | None, gen: bool) -> str:
-    kwargs: dict[str, Any] = {"tokenize": False, "add_generation_prompt": gen}
-    if tools:
-        kwargs["tools"] = tools
-    return tok.apply_chat_template(messages, **kwargs)
+    from agentdistill.data.template_check import render as render_messages
+
+    # Through the shared renderer: DPO's pairs must be rendered exactly as the dataset was, tool-call argument
+    # shape included.
+    return render_messages(tok, messages, tools, add_generation_prompt=gen)
 
 
 def render_pair(tok: Any, pair: dict, strip_bos: str | None = None) -> dict:

@@ -5,6 +5,10 @@ The dataset is already tokenized and masked by `agentdistill.data.build`, so the
 this pipeline most likely to be silently wrong, so it is computed once, asserted in tests, and inspectable with
 `agentdistill dataset inspect` -- not recomputed here from a chat template a second time.
 
+The dataset is only valid for the tokenizer it was built with, so `check_dataset_tokenizer` compares the dataset
+manifest's tokenizer identity with the configured base model before any weights load. Without it, a base-model
+change with a forgotten rebuild trains on token ids from a different vocabulary and looks exactly like a normal run.
+
 TRL's config field names move between releases. `resolve_sft_config` checks what the installed version accepts
 and reports an actionable error rather than passing an unknown kwarg into a stack trace.
 """
@@ -33,6 +37,65 @@ class TrainingUnavailable(ImportError):
 
 class NoSuchBaseModel(ValueError):
     """`train.base_model` has no loadable weights. Most often a tokenizer-only path."""
+
+
+class TokenizerMismatch(ValueError):
+    """The dataset was tokenized for a different base model or revision than the one configured to train."""
+
+
+def _same_model(a: str, b: str) -> bool:
+    """Both sides come from `cfg.base_model`-resolved strings; a local path is also compared resolved, so a
+    trailing slash or a symlinked checkout does not count as a different model."""
+    if a == b:
+        return True
+    pa, pb = Path(a), Path(b)
+    return pa.exists() and pb.exists() and pa.resolve() == pb.resolve()
+
+
+def check_dataset_tokenizer(cfg: dict, dataset_path: str | Path) -> list[str]:
+    """Refuse a dataset tokenized for a different model than `cfg` trains. Returns warnings; raises on mismatch.
+
+    `cfg` is `ProjectConfig.train_config()`, whose `base_model` is resolved the same way the dataset build
+    resolved it (`cfg.base_model`), so the two strings are comparable. The model id has been in every manifest
+    since the first schema; the pinned revision was added later, so a manifest without it is only a failure when
+    the config pins a revision -- then it cannot show it matches. Otherwise it is a warning.
+    """
+    from agentdistill.data.artifact import MANIFEST_NAME
+
+    path = Path(dataset_path)
+    manifest_path = path / MANIFEST_NAME if path.is_dir() else path.parent / MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+
+    want_model = str(cfg.get("base_model") or "")
+    want_rev = cfg.get("base_model_revision") or None
+    have_model = manifest.get("tokenizer")
+    rebuild = "Rebuild the dataset with `agentdistill curate` against the configured base model, then train on it."
+
+    if have_model is not None and not _same_model(str(have_model), want_model):
+        raise TokenizerMismatch(
+            f"dataset at {path} was tokenized for base model {have_model!r} (revision "
+            f"{manifest.get('base_model_revision')!r}), but train.base_model is {want_model!r} (revision "
+            f"{want_rev!r}). {rebuild}"
+        )
+
+    if "base_model_revision" not in manifest:
+        why = ("has no manifest" if not manifest else "manifest predates tokenizer recording")
+        if want_rev:
+            raise TokenizerMismatch(
+                f"dataset at {path} {why}, so it cannot show it was tokenized at train.base_model_revision "
+                f"{want_rev!r} of {want_model!r} (dataset records base model {have_model!r}, revision unknown). "
+                f"{rebuild}"
+            )
+        return [f"dataset at {path} {why}; its tokenizer ({have_model!r}) is assumed to match "
+                f"{want_model!r}. Rebuild with `agentdistill curate` to record it."]
+
+    have_rev = manifest.get("base_model_revision")
+    if have_rev != want_rev:
+        raise TokenizerMismatch(
+            f"dataset at {path} was tokenized for {have_model!r} at revision {have_rev!r}, but "
+            f"train.base_model_revision is {want_rev!r} (base model {want_model!r}). {rebuild}"
+        )
+    return []
 
 
 @dataclass
@@ -143,6 +206,11 @@ def train_sft(
     a much lower learning rate than a fresh run -- the retrain loop uses a third -- because the weights start
     near a good solution and a fresh-run rate walks straight out of it.
     """
+    # Before the dependency check and before any weights load: loading an 8B model only to discover the dataset
+    # is for a different one wastes the most expensive minutes of the day.
+    for warning in check_dataset_tokenizer(cfg, dataset_path):
+        logger.warning("train sft: %s", warning)
+
     _require_training_deps()
 
     import torch

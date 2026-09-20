@@ -144,6 +144,27 @@ def _provenance(value: Any) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def latest_round(registry: Any, tag: str | None = None) -> dict | None:
+    """The newest on-policy round in a tag scope (exact tag or glob), or the newest overall with no tag.
+
+    Newest by start time, then round index: rounds of one tag are recorded in order, but a report without a tag
+    spans sessions, and round 0 of today's session is newer than round 2 of last week's.
+    """
+    from sqlalchemy.exc import DBAPIError
+
+    from agentdistill.registry.select import rounds_for_tag
+
+    try:
+        # `rounds_for_tag` filters nothing when the tag is None.
+        rows = rounds_for_tag(registry, tag)  # type: ignore[arg-type]
+    except DBAPIError:
+        # A registry from before on-policy rounds existed has no table; that is "no round", not a broken report.
+        return None
+    if not rows:
+        return None
+    return max(rows, key=lambda r: (r.get("started_at") or "", r.get("round_idx") or 0))
+
+
 def latest_quantized(registry: Any, parent_adapter_id: str) -> dict | None:
     """The quantized artifact derived from an adapter, if one was registered."""
     with registry.engine.connect() as conn:

@@ -22,6 +22,19 @@ Subjects:
 | an adapter name | base + that LoRA |
 | `http:<model>@<url>` | any OpenAI-compatible endpoint — a teacher API, a vLLM server, the gateway later |
 
+### Batched runs and throughput
+
+`run_eval(..., batch_size=N)` runs an eval in lockstep. With a batch size, every (task, repeat) runs in lockstep: up to that many are in flight, and each step asks the
+model for the next turn of all of them in one batched call. Finished tasks leave, queued ones join. Each turn
+goes through the same per-turn rules as the sequential harness, and a test holds the two to identical
+trajectories, so batching changes the throughput and nothing else.
+
+Throughput is recorded with its mode. `throughput_mode: batched` means completion tokens over the seconds spent
+inside batched generate calls, at the stated batch size. Anything else, including a client that cannot batch
+(transformers, a cascade, a teacher API) is `unbatched`: one request at a time, a floor on serving throughput.
+The report prices the cascade against the teacher only from a batched figure; from an unbatched one it raises
+`cost_unbatched` and prints the escalation rate and the measurement conditions instead of a saving.
+
 ## Replay, and why divergence is its own metric
 
 The student never touches a live service. Tool results come from the recording, keyed by canonical argument hash

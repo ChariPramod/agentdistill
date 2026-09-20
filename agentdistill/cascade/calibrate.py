@@ -38,8 +38,11 @@ MIN_USEFUL_AUROC = 0.6
 #: load such a calibration, so a coin flip never decides which turns reach the teacher.
 MIN_INFORMATIVE_AUROC = 0.55
 
+#: Holdout AUROC from which a gate is reliable enough to threshold on, given an acceptable ECE.
+RELIABLE_AUROC = MIN_USEFUL_AUROC
+
 #: The verdicts a calibration row can carry. Only `usable` is ever loaded by the gateway.
-VERDICTS = ("usable", "no_threshold", "unreliable", "uninformative")
+VERDICTS = ("usable", "no_threshold", "unreliable", "uninformative", "degenerate_labels")
 
 #: Minimum minority-class samples per calibration fold.
 MIN_PER_FOLD = 10
@@ -70,8 +73,8 @@ class CalibrationResult:
         """Is this gate worth thresholding on, rather than escalating everything?"""
         return (
             self.n_turns >= self.min_turns
-            and self.holdout.get("auroc", 0.0) >= MIN_USEFUL_AUROC
-            and self.holdout.get("ece", 1.0) <= MAX_ACCEPTABLE_ECE
+            and (self.holdout.get("auroc") or 0.0) >= MIN_USEFUL_AUROC
+            and (1.0 if self.holdout.get("ece") is None else self.holdout["ece"]) <= MAX_ACCEPTABLE_ECE
         )
 
     def to_dict(self) -> dict:
@@ -90,23 +93,39 @@ class CalibrationResult:
         }
 
 
-def gate_verdict(result: CalibrationResult, threshold_chosen: bool) -> str:
-    """One word for what the gate is good for. Only a fitted gate has a verdict; an unfitted one has no row.
+def verdict_for(n_turns: int, n_positive: int, auroc: float | None, ece: float | None, min_turns: int,
+                min_auroc: float = MIN_INFORMATIVE_AUROC, reliable_auroc: float = RELIABLE_AUROC,
+                max_ece: float = MAX_ACCEPTABLE_ECE) -> tuple[str, str]:
+    """(verdict, reason) for a gate's measurements. Only `usable` is loaded by the gateway.
 
-    - `uninformative`: holdout AUROC below 0.55, or undefined. The gate is at chance.
-    - `unreliable`: it separates turns somewhat, but too few turns, too low an AUROC, or an ECE too high to
-      threshold on.
-    - `no_threshold`: a good gate, but no threshold keeps the success drop inside the budget.
-    - `usable`: the only verdict the gateway loads.
+    The causes are kept apart because their fixes differ. `degenerate_labels` means every turn got the same label
+    -- the tasks did not separate, a data problem. `uninformative` means the labels separated and the features
+    could not tell them apart -- a feature problem. A random tiny model gets every turn wrong, so tiny mode reports
+    the first, which is the honest label for it.
     """
-    auroc = result.holdout.get("auroc")
-    if auroc is None or auroc != auroc or auroc < MIN_INFORMATIVE_AUROC:
-        return "uninformative"
-    if not result.usable:
-        return "unreliable"
-    if not threshold_chosen:
-        return "no_threshold"
-    return "usable"
+    n_negative = n_turns - n_positive
+    if n_turns < min_turns:
+        return "unreliable", f"{n_turns} labelled turns below the minimum of {min_turns}"
+    if n_positive == 0 or n_negative == 0:
+        only = "good" if n_negative == 0 else "bad"
+        return "degenerate_labels", f"every one of {n_turns} labelled turns is {only}; AUROC is undefined"
+    if auroc is None or auroc != auroc:
+        return "unreliable", "AUROC could not be computed"
+    if auroc < min_auroc:
+        return "uninformative", f"holdout AUROC {auroc:.3f} below {min_auroc}"
+    if auroc < reliable_auroc or (ece is not None and ece > max_ece):
+        return "unreliable", f"AUROC {auroc:.3f}, ECE {'n/a' if ece is None else round(ece, 3)}"
+    return "usable", f"AUROC {auroc:.3f}, ECE {'n/a' if ece is None else round(ece, 3)}"
+
+
+def gate_verdict(result: CalibrationResult, n_positive: int, threshold_chosen: bool) -> tuple[str, str]:
+    """`verdict_for` on a fit, plus the threshold search's say: a usable gate with no threshold inside the
+    budget is `no_threshold`."""
+    verdict, reason = verdict_for(result.n_turns, n_positive, result.holdout.get("auroc"),
+                                  result.holdout.get("ece"), result.min_turns)
+    if verdict == "usable" and not threshold_chosen:
+        return "no_threshold", f"{reason}; no threshold keeps the success drop inside the budget"
+    return verdict, reason
 
 
 def split_by_task(task_ids: list[str], frac: float = 0.7, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
@@ -240,8 +259,7 @@ def fit_calibrator(
         )
         # Recorded as what it is: a measurement with no variance. AUROC is undefined, which is the definition of
         # a gate that cannot separate anything.
-        holdout = {"n": len(y), "positive_rate": float(y.mean()), "auroc": float("nan"), "ece": float("nan"),
-                   "brier": float("nan")}
+        holdout = {"n": len(y), "positive_rate": float(y.mean()), "auroc": None, "ece": None, "brier": None}
         return CalibrationResult(
             feature_order=feature_order, holdout=holdout, in_sample={}, reliability_bins=[],
             n_turns=len(y), n_tasks=n_tasks, label_mix=label_mix or {}, model=None, notes=notes,

@@ -213,6 +213,77 @@ registry row rather than inferred from absence:
 - With pairs capped, a tiny round has 15 pairs and discarded before DPO, so the rehearsal never trained DPO. Tiny
   mode now sets `onpolicy.min_pairs: 10`.
 
+### The boot-time feature check allows an ordered subset (phase 3e §4.2)
+
+The plan says `cascade.features` must *equal* the calibration's features, in order. The gateway instead accepts
+any stored order that is a subsequence of the configured one and scores with the stored order, because
+calibration legitimately drops features that had no values; requiring equality would refuse every such gate.
+What it refuses is what scores wrongly: a fitted feature the config no longer produces, a different relative
+order, or a registry row whose `feature_order` disagrees with its `calibration.json`. Before this the gateway ran
+the subset check but then scored with the full configured list, so a narrowed calibration crashed or, worse,
+scored misaligned columns. The rule lives in `cascade.client.scoring_order` and `from_calibration` uses it too.
+
+### The tokenizer guard checks the model id on legacy manifests too (phase 3e §2.1 step 6)
+
+Manifests now record `base_model_revision` (the pin actually applied at build time, `null` when unpinned). A
+manifest without that key predates the recording, and is a failure only when the config pins a revision, a
+warning otherwise, as planned. The model id, though, has been in every manifest as `tokenizer` since the first
+schema, so it is compared even on a legacy manifest: that is precisely the fixture-tokenized registry dataset
+meeting a real base model. The revision enters the content hash only when set, so unpinned datasets keep their
+hashes, and a pinned rebuild of otherwise identical samples is a new dataset rather than a reuse of the old one
+with its old manifest -- which would fail the guard forever. `test_sft_smoke`'s two-step test now trains on a
+dataset recorded for the tiny model it trains, rather than for the fixture tokenizer it happens to share.
+
+### The batched runner: what it batches, and how order is checked (phase 3e §4.1)
+
+The lockstep runner (`eval/lockstep.py`) and the sequential `run_task` both drive one `TaskStepper`, so the
+per-turn rules exist once. Four choices the plan left open or stated differently:
+
+- `VllmOfflineTurnClient.next_turns_batch` calls `LLM.generate` on prompts rendered with the project tokenizer,
+  not `LLM.chat`. `chat` takes one tools list for the whole batch and renders with vLLM's copy of the template;
+  either would make a batched turn differ from a sequential one. `next_turn` is now a batch of one, so both
+  share rendering, sampling and parsing. Order is asserted against each output's `prompt`, not trusted.
+- `run_eval(..., batch_size=N)` uses the lockstep runner only for a client that has `next_turns_batch` and no
+  per-task state (`reset`, `summary`, `usage`): interleaving tasks would scramble a cascade's gate summary and a
+  teacher's per-task usage. Everything else runs sequentially and is recorded `throughput_mode: unbatched`. The
+  runner itself still drives a non-batching client one `next_turn` per item (never labelled batched), for tests.
+- A generic batched client cannot prove its order to the runner; the runner checks count and shape, and the
+  order check lives in the vLLM client, the one place that can see which prompt an output belongs to.
+- Under `cost_unbatched` the cost dict also carries `saving_frac` and `breakeven_tasks_per_day` as `null` (not
+  only hidden by the renderers), with `cost_is_upper_bound: true`; `student_cost_per_mtok` stays, as an upper
+  bound. Every run now records `throughput_mode`; a run without it reads as unbatched. `tests/test_report.py`'s
+  seed marks its throughput batched, since it stands for a measured serving figure.
+
+Tiny mode's student eval runs on the transformers client, which does not batch, so a tiny report carries
+`cost_unbatched`: the rehearsal's allow list needs it, and the GPU day should forbid it.
+
+### Base-model selection, and the bug base-check found (phase 3e §2.1)
+
+`Qwen/Qwen2.5-7B-Instruct`, pinned at `a09a35458c702b33eeacc393d103063234e8bc28`, tool parser `hermes`. It is the
+only candidate checked so far; the others in the plan's list are unevaluated, and a later change of base should
+start by recording its `base-check` output here.
+
+| Candidate | has_template | accepts_tools | prefix_stable | tool_call_roundtrip |
+|---|---|---|---|---|
+| Qwen/Qwen2.5-7B-Instruct | PASS | PASS | PASS | PASS (hermes; after the fix below) |
+
+The first run failed the round trip, and the cause was ours rather than the model's. Traces store tool-call
+arguments the way the OpenAI wire format does, as a JSON **string**. Chat templates serialize whatever they are
+given, so Qwen's template emitted `"arguments": "{\"customer_id\": \"x\"}"` -- a quoted, escaped string -- and
+the hermes parser recovered a string rather than the call's arguments. A student trained on that text would emit
+tool calls the serving stack drops, silently. `render` now converts arguments to objects at the single point where
+a chat template is applied, which is what the HF convention expects.
+
+It went unnoticed because all four fixture templates interpolated `{{ c.function.arguments }}` raw, which only
+works when the value is already a serialized string. Real templates apply `tojson`. The fixtures now do too, so
+they model the templates that exist rather than the one shape that hid this.
+
+### The example's real config needs the network; tiny mode still does not (phase 3e §2.1)
+
+`examples/support_agent/project.yaml` now names a Hub base model and a real teacher, so building the real dataset
+downloads a tokenizer. The rehearsal path is unchanged: `project.tiny.yaml` keeps the locally generated tiny model
+and the replay teacher, and the whole clean rehearsal still runs offline.
+
 ## Blocked on hardware or credentials
 
 | Item | Blocker |

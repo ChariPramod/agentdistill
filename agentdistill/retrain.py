@@ -40,6 +40,11 @@ class Stage:
     gate: Callable[[dict], tuple[bool, str]] | None = None
     #: What this stage would do, for `--dry-run`. Takes the context, returns one line.
     describe: Callable[[dict], str] | None = None
+    #: Context keys this stage reads, and the ones it writes. A test walks the list and checks every input is
+    #: produced by an earlier stage: the calibrate stage once had no eval run to calibrate from, and every retrain
+    #: failed there a week after anyone could have noticed.
+    needs: tuple[str, ...] = ()
+    provides: tuple[str, ...] = ()
 
 
 @dataclass
@@ -226,6 +231,9 @@ def gate_calibrated(ctx: dict) -> tuple[bool, str]:
     AUROC is what catches that.
     """
     metrics = ctx.get("calibration") or {}
+    verdict = ctx.get("calibration_verdict")
+    if verdict is not None and verdict != "usable":
+        return False, f"the gate's verdict is {verdict!r}; the gateway would refuse it and escalate everything"
     ece, auroc = metrics.get("ece"), metrics.get("auroc")
     if ece is None or auroc is None:
         return False, "calibration produced no holdout metrics; the cascade would escalate everything"

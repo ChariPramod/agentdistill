@@ -6,6 +6,11 @@ hash. If a dataset could change under a hash, none of those numbers would mean a
 
 The content hash is computed over the *sorted* sample hashes, so it does not depend on the order samples happened
 to be written in, and over the manifest fields that determine content (tokenizer, max_seq_len, filter config).
+
+The manifest also records which tokenizer the samples were built for -- the base model id in the resolved form
+the build used, and the revision pinned in config -- because `train sft` refuses a dataset tokenized for a
+different model than the one it is about to train. A dataset that silently outlives a base-model change looks
+exactly like a normal run.
 """
 
 from __future__ import annotations
@@ -75,10 +80,16 @@ def manifest_core(
     filter_config: dict,
     kind: str,
     target: str,
+    base_model_revision: str | None = None,
 ) -> dict[str, Any]:
     """Only fields that change the samples belong here; timestamps and paths must not, or the hash would differ
-    on every run."""
-    return {
+    on every run.
+
+    `base_model_revision` (the pin from config) is hashed only when set. Unpinned datasets keep the hash they
+    always had, and a pinned rebuild never collides with an unpinned dataset of identical samples -- which would
+    otherwise be reused, manifest and all, and fail the train-time tokenizer check forever.
+    """
+    core: dict[str, Any] = {
         "kind": kind,
         "tokenizer": tokenizer,
         "tokenizer_revision": tokenizer_revision,
@@ -87,6 +98,9 @@ def manifest_core(
         "filter_config": filter_config,
         "schema_version": 1,
     }
+    if base_model_revision is not None:
+        core["base_model_revision"] = base_model_revision
+    return core
 
 
 def write_dataset(
@@ -102,13 +116,16 @@ def write_dataset(
     filter_config: dict | None = None,
     target: str = "all_assistant",
     extra: dict | None = None,
+    base_model_revision: str | None = None,
 ) -> DatasetArtifact:
     """Write parquet + manifest and return the artifact. Refuses to overwrite a different dataset at the same path."""
     out = Path(path)
     out.mkdir(parents=True, exist_ok=True)
 
     sample_hashes = [s.hash() for s in samples]
-    core = manifest_core(tokenizer, tokenizer_revision, max_seq_len, filter_config or {}, kind, target)
+    core = manifest_core(
+        tokenizer, tokenizer_revision, max_seq_len, filter_config or {}, kind, target, base_model_revision
+    )
     content_hash = compute_content_hash(sample_hashes, core)
 
     existing = out / MANIFEST_NAME
@@ -140,6 +157,9 @@ def write_dataset(
     n_target = sum(s.n_target_tokens for s in samples)
     manifest = {
         **core,
+        # Always present, even when None: its absence is how the train-time check recognises a manifest written
+        # before tokenizer identity was recorded.
+        "base_model_revision": base_model_revision,
         "name": name,
         "version": version,
         "content_hash": content_hash,
@@ -203,6 +223,8 @@ def verify(path: str | Path) -> tuple[bool, str]:
     core_fields = ("kind", "tokenizer", "tokenizer_revision", "max_seq_len", "target", "filter_config",
                    "schema_version")
     core = {k: manifest[k] for k in core_fields}
+    if manifest.get("base_model_revision") is not None:
+        core["base_model_revision"] = manifest["base_model_revision"]
     recomputed = compute_content_hash(hashes, core)
     if recomputed != manifest["content_hash"]:
         return False, f"content hash mismatch: manifest {manifest['content_hash'][:12]}, recomputed {recomputed[:12]}"

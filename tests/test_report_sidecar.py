@@ -110,6 +110,30 @@ def test_an_uninformative_gate_is_coded_and_says_so(registry, cfg):
     assert r.cascade["escalate_everything"] is True
 
 
+def test_a_degenerate_gate_has_its_own_code_and_renders_an_undefined_auroc(registry, cfg):
+    """All-one-class labels are a data problem, coded apart from an uninformative gate so tiny mode can allow it
+    while the GPU day forbids it. AUROC is None there, and must render rather than crash."""
+    seed(registry, with_quantized=True)
+    reason = "every one of 60 labelled turns is bad; AUROC is undefined"
+    with registry.engine.begin() as conn:
+        conn.execute(text("UPDATE calibrations SET verdict = 'degenerate_labels', auroc = NULL, "
+                          "holdout_metrics = :h, report = :r"),
+                     {"h": dumps({"auroc": None, "ece": 0.02, "brier": 0.1, "n": 60}),
+                      "r": dumps({"verdict_reason": reason})})
+    r = assemble(registry, cfg, tag_glob="gpu-day")
+    assert "gate_degenerate" in codes(r)
+    assert "gate_not_usable" not in codes(r)
+    message = r.warnings[r.warning_codes.index("gate_degenerate")]
+    assert "degenerate labels" in message and reason in message
+    assert r.calibration["verdict_reason"] == reason
+    assert r.cascade["escalate_everything"] is True
+    block, html = results_block(r), render(r)
+    assert "AUROC n/a" in block and "AUROC n/a" in html
+    assert block.count(reason) >= 2, "the gate line prints the reason as well as the warning"
+    assert escape(reason) in html.split("<h2>Gate</h2>")[1]
+    assert "AUROC nan" not in block and "AUROC nan" not in html
+
+
 def test_a_quantized_artifact_never_evaluated_keeps_its_own_code(registry, cfg):
     seed(registry)
     registry.insert_adapter({"id": "ad1q", "training_run_id": "tr1", "name": "support-fp8", "version": 2,

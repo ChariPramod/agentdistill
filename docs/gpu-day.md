@@ -24,14 +24,17 @@ without a marker so the rerun retries it. The only way to pass without a row is 
 
 ## Pre-flight, the day before
 
-**1. Tiny rehearsal green from a clean checkout.**
+**1. Clean rehearsal green from a fresh clone.**
 
 ```bash
-rm -rf artifacts/gpu_day && AGENTDISTILL_TINY=1 bash scripts/gpu_day.sh
+git clone <this repo> /tmp/preflight && cd /tmp/preflight
+bash scripts/clean_rehearsal.sh        # no CLEAN_ALLOW_DIRTY: a dirty tree must fail here
 ```
 
 Twenty to forty minutes on a laptop, dominated by the two training stages. The numbers are garbage and the
-report says so; what is being checked is that every stage executes in sequence. See [tiny mode](#tiny-mode).
+report says so; what is being checked is that every stage executes in sequence and the report's assertions pass.
+From a fresh clone, not just a clean working tree: the first fresh-clone run failed on its first data step,
+because the corpus is generated and gitignored and nothing rebuilt it. See [tiny mode](#tiny-mode).
 
 **2. Base model check.**
 
@@ -48,6 +51,19 @@ the session.
 **3. Pin versions.** `requirements-gpu.txt` holds them. Three are not pinnable from a laptop — `torch` (must
 match the box's CUDA), `vllm`, `llmcompressor` — and the file says so and says what to do. **Install vLLM
 first**: it pulls its own torch and will replace one installed before it.
+
+**3b. Seed the teacher's price, and rebuild the dataset for the pinned tokenizer.**
+
+```bash
+agentdistill pricing set claude-opus-5 --provider anthropic --input 5.0 --output 25.0 --cache-read 0.5 \
+  --effective-from <today> --config examples/support_agent/project.yaml
+agentdistill curate --config examples/support_agent/project.yaml   # tokenized by the pinned base model
+```
+
+The registry is gitignored, so a fresh clone or a rented box has neither row. Without a price the cost block
+cannot be computed, and the cascade saving -- the number this project exists to produce -- has nothing to compare
+against. The dataset must be rebuilt whenever `train.base_model` or `train.base_model_revision` changes; `train
+sft` refuses a dataset tokenized for anything else and prints both values.
 
 **4. Teacher API key, with a hard spend cap.** The eval and rollout stages call the teacher, and the on-policy
 rounds call it per rollout. Set the cap on the key itself, not in your head. A loop that retries on a 500 will
@@ -125,7 +141,24 @@ works, and every stage after `sft` depends on it.
 
 Then start the script and read the log. `logs/gpu_day.<stage>.log` has each stage's output.
 
-When it finishes, `artifacts/gpu_day/report.html` is the result, and
+When it finishes, `artifacts/gpu_day/report.html` is the result. Assert it before reading it. Every disclosure tiny
+mode is allowed to make is a finding here: degenerate calibration labels mean the calibration set does not
+separate, a replay teacher means the teacher section is wrong, and unbatched cost means no saving can be claimed.
+
+```bash
+python -m agentdistill.tools.assert_report artifacts/gpu_day/report.html \
+  --require-subjects base,student,teacher \
+  --require-sections calibration,cascade,cost,quantization,onpolicy \
+  --forbid-warning tiny_mode --forbid-warning replay_teacher --forbid-warning gate_degenerate \
+  --forbid-warning cost_unbatched --forbid-warning dirty_tree --forbid-warning no_run_found \
+  --forbid-warning no_calibration --forbid-warning cascade_unverified --forbid-warning quantization_missing
+```
+
+A `gate_not_usable` warning is allowed: an uninformative gate on real data is a real result, and the cascade
+section says "escalate everything". `gate_degenerate` is not, because it means every labelled turn got the same
+outcome, and that is a problem with the calibration set rather than a finding about the gate.
+
+Then
 
 ```bash
 agentdistill report --format md --inject README.md

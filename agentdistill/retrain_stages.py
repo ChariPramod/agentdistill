@@ -89,11 +89,28 @@ def build_stages(cfg: Any, registry: Any, runner: Runner | None = None, since: s
         candidate = ctx.get("candidate_adapter")
         run([*ad, "eval", "run", str(candidate), "--n", str(cfg.eval.n_per_task), *config])
         ctx["comparison"] = _compare_with_prod(registry, cfg, candidate)
+        # The run the gate is fitted from: the calibration set, with logprobs. Without it `calibrate` has nothing
+        # to label and exits -- which is how every retrain used to stop at calibrate.
+        ctx["calib_eval_run"] = None
+        if cfg.eval.calib_set:
+            run([*ad, "eval", "run", str(candidate), "--eval-set", cfg.eval.calib_set, "--n", "3",
+                 "--policy", "fuzzy", "--logprobs", "--samples", str(cfg.cascade.k_samples), *config])
+            ctx["calib_eval_run"] = _latest_eval_id(registry, candidate, cfg.eval.calib_set)
         return ctx
 
     def calibrate(ctx: dict) -> dict:
-        run([*ad, "calibrate", str(ctx.get("candidate_adapter")), *config])
-        ctx["calibration"] = _holdout_metrics(registry, ctx.get("candidate_adapter"))
+        candidate = ctx.get("candidate_adapter")
+        source = ctx.get("calib_eval_run")
+        ctx["calibration"], ctx["calibration_id"], ctx["calibration_verdict"] = None, None, None
+        if not source:
+            # Stated rather than attempted: the gate reads a missing calibration as a stop, with this reason.
+            ctx["calibration_verdict"] = "no calibration eval run; set eval.calib_set"
+            return ctx
+        run([*ad, "calibrate", str(candidate), "--from-eval", str(source), *config])
+        row = _calibration_row(registry, candidate)
+        ctx["calibration_id"] = row.get("id")
+        ctx["calibration"] = row.get("holdout_metrics")
+        ctx["calibration_verdict"] = row.get("verdict")
         return ctx
 
     def quantize(ctx: dict) -> dict:
@@ -120,17 +137,28 @@ def build_stages(cfg: Any, registry: Any, runner: Runner | None = None, since: s
         return ctx
 
     described = [
-        ("ingest_gateway", ingest_gateway, lambda c: f"import graded requests since {since}"),
-        ("curate", curate, lambda c: "rebuild the SFT dataset with the configured filters"),
+        ("ingest_gateway", ingest_gateway, lambda c: f"import graded requests since {since}",
+         (), ("n_requests",)),
+        ("curate", curate, lambda c: "rebuild the SFT dataset with the configured filters",
+         (), ("n_new_samples", "dataset_samples")),
         ("train_sft_continue", train_sft_continue,
-         lambda c: "one epoch at lr/3, continuing from the prod adapter"),
-        ("onpolicy", onpolicy, lambda c: "one on-policy round from the new adapter"),
-        ("eval", evaluate, lambda c: f"eval on {cfg.eval.eval_set} at N={cfg.eval.n_per_task}"),
-        ("calibrate", calibrate, lambda c: "fit the confidence gate and verify it on a disjoint split"),
-        ("quantize", quantize, lambda c: f"quantize as {cfg.serve.quantization or 'nothing (not configured)'}"),
-        ("promote_canary", promote_canary, lambda c: "promote to canary if every lifecycle check is green"),
+         lambda c: "one epoch at lr/3, continuing from the prod adapter",
+         (), ("training_run_id", "eval_loss", "candidate_adapter")),
+        ("onpolicy", onpolicy, lambda c: "one on-policy round from the new adapter",
+         ("candidate_adapter",), ("round_decision", "round_id", "candidate_adapter")),
+        ("eval", evaluate,
+         lambda c: f"eval on {cfg.eval.eval_set} at N={cfg.eval.n_per_task}, and on "
+                   f"{cfg.eval.calib_set or '(no eval.calib_set)'} with logprobs for the gate",
+         ("candidate_adapter",), ("comparison", "calib_eval_run")),
+        ("calibrate", calibrate, lambda c: "fit the confidence gate from the calibration-set run",
+         ("candidate_adapter", "calib_eval_run"), ("calibration", "calibration_id", "calibration_verdict")),
+        ("quantize", quantize, lambda c: f"quantize as {cfg.serve.quantization or 'nothing (not configured)'}",
+         ("candidate_adapter",), ("quantization_drop_pp", "quantized_adapter")),
+        ("promote_canary", promote_canary, lambda c: "promote to canary if every lifecycle check is green",
+         ("candidate_adapter", "quantized_adapter"), ("promotion_checks", "promoted")),
     ]
-    return [Stage(name=n, run=f, gate=GATES[n], describe=d) for n, f, d in described]
+    return [Stage(name=n, run=f, gate=GATES[n], describe=d, needs=needs, provides=provides)
+            for n, f, d, needs, provides in described]
 
 
 # ------------------------------------------------------------------------------------------------------------
@@ -227,13 +255,21 @@ def _compare_with_prod(registry: Any, cfg: Any, candidate: str | None) -> dict |
         return None
 
 
-def _holdout_metrics(registry: Any, adapter_id: str | None) -> dict | None:
+def _calibration_row(registry: Any, adapter_id: str | None) -> dict:
     from agentdistill.report.registry_views import calibration_for
 
     if not adapter_id:
+        return {}
+    return calibration_for(registry, adapter_id) or {}
+
+
+def _latest_eval_id(registry: Any, subject: Any, eval_set: str) -> str | None:
+    from agentdistill.registry.select import NoMatch, latest_eval
+
+    try:
+        return latest_eval(registry, subject=str(subject), eval_set=eval_set)["id"]
+    except NoMatch:
         return None
-    row = calibration_for(registry, adapter_id)
-    return (row or {}).get("holdout_metrics")
 
 
 def _success_drop_pp(registry: Any, cfg: Any, bf16: str | None, quantized: str | None) -> float | None:

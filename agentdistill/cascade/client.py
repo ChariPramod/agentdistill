@@ -132,6 +132,56 @@ class CascadeTurnClient:
         }
 
 
+class FeatureOrderMismatch(ValueError):
+    """The runtime cannot build the vector the calibration was fitted on, in the order it was fitted on."""
+
+
+def scoring_order(
+    configured: list[str] | tuple[str, ...],
+    report_order: list[str] | None,
+    row_order: list[str] | None = None,
+) -> list[str]:
+    """The feature order to score with, or `FeatureOrderMismatch` saying why there is none.
+
+    The one rule shared by the gateway at boot and the offline cascade, so what is measured is what serves:
+
+    - the stored order is authoritative, because the model expects exactly the columns it was fitted on;
+    - it may be a subset of the configured features, because calibration drops columns that had no values;
+    - every stored feature must be configured (the runtime cannot produce the others), and the stored features
+      must appear in the same relative order as configured. A reordered config means someone edited
+      `cascade.features` after calibrating, and the calibration no longer describes the runtime.
+
+    The registry row and calibration.json both record the order; if both are present they must agree, because a
+    disagreement means the artifact on disk is not the one the row describes.
+    """
+    configured_list = list(configured)
+    from_row, from_report = list(row_order or []), list(report_order or [])
+    if from_row and from_report and from_row != from_report:
+        raise FeatureOrderMismatch(
+            f"the calibration row records feature order {from_row} but its calibration.json records "
+            f"{from_report}; the artifact is not the one the row describes"
+        )
+    stored = from_row or from_report
+    if not stored:
+        raise FeatureOrderMismatch("the calibration records no feature order; it cannot be used to score")
+
+    missing = [f for f in stored if f not in configured_list]
+    if missing:
+        raise FeatureOrderMismatch(
+            f"feature order mismatch: the calibration was fitted on {stored} but {missing} "
+            f"{'is' if len(missing) == 1 else 'are'} not in the configured cascade.features {configured_list}. "
+            f"Recalibrate, or restore the features it was fitted on."
+        )
+    positions = [configured_list.index(f) for f in stored]
+    if positions != sorted(positions):
+        in_config_order = [f for f in configured_list if f in stored]
+        raise FeatureOrderMismatch(
+            f"feature order mismatch: the calibration expects {stored} but cascade.features orders them as "
+            f"{in_config_order} (configured: {configured_list}). Recalibrate, or restore the configured order."
+        )
+    return stored
+
+
 def from_calibration(
     student: SamplingBackend,
     teacher: SamplingBackend,
@@ -140,21 +190,23 @@ def from_calibration(
     threshold: float | None = None,
     k_samples: int = 2,
     cluster_prior: float = 0.5,
+    stored_order: list[str] | None = None,
 ) -> CascadeTurnClient:
-    """Build a cascade from a stored calibration, asserting the feature order still matches.
+    """Build a cascade from a stored calibration, scoring with the order it was fitted on.
 
     A gate whose calibration is missing or unusable escalates everything. That is the documented default: a
     cascade with a meaningless gate is worse than no cascade, because it escalates the wrong turns while
     reporting a threshold that sounds meaningful.
+
+    A feature-order mismatch raises `FeatureOrderMismatch` rather than escalating everything: an eval run is a
+    measurement, and measuring a cascade that is not the one that would serve is worse than not measuring.
+    `stored_order` is the registry row's `feature_order`, checked against calibration.json when given.
     """
-    from agentdistill.cascade.calibrate import assert_feature_order, load
+    from agentdistill.cascade.calibrate import load
 
     model, report = load(calibration_dir)
-    # The stored order wins: calibration may have dropped features that had no values, and the model expects
-    # exactly the columns it was fitted on.
-    effective = assert_feature_order(report, configured_features) if model is not None else list(
-        configured_features
-    )
+    effective = (scoring_order(configured_features, report.get("feature_order"), stored_order)
+                 if model is not None else list(configured_features))
     usable = model is not None and report.get("usable", False)
     return CascadeTurnClient(
         student=student,

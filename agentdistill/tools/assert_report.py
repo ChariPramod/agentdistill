@@ -73,6 +73,11 @@ def section_problem(name: str, data: dict) -> str | None:
         if (data.get("quantization") or {}).get("delta_pp") is None:
             return "quantization has no delta_pp"
         return None
+    if name == "onpolicy":
+        # A discard is a finding and passes; what fails is a round with no recorded decision.
+        if not (data.get("onpolicy") or {}).get("decision"):
+            return "onpolicy has no recorded round decision"
+        return None
     if not data.get(name):
         return f"section {name} is empty"
     return None

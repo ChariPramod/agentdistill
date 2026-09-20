@@ -690,6 +690,34 @@ class Registry:
         with self.engine.connect() as conn:
             return int(conn.execute(text("SELECT COUNT(*) FROM onpolicy_rounds")).scalar() or 0)
 
+    def set_pricing(self, provider: str, model: str, input_per_mtok: float, output_per_mtok: float,
+                    cache_read_per_mtok: float | None = None, effective_from: str | None = None) -> str:
+        """Record a model's prices from a date. Prices change; the report must use the one in force for a run,
+        so rows are keyed by date and never overwritten."""
+        at = effective_from or utcnow()[:10]
+        with self.engine.begin() as conn:
+            conn.execute(
+                text("""INSERT OR REPLACE INTO model_pricing
+                            (provider, model, input_per_mtok, output_per_mtok, cache_read_per_mtok, effective_from)
+                        VALUES (:p, :m, :i, :o, :c, :at)"""
+                     if self.dialect == "sqlite" else
+                     """INSERT INTO model_pricing
+                            (provider, model, input_per_mtok, output_per_mtok, cache_read_per_mtok, effective_from)
+                        VALUES (:p, :m, :i, :o, :c, :at)
+                        ON CONFLICT (provider, model, effective_from) DO UPDATE
+                        SET input_per_mtok = :i, output_per_mtok = :o, cache_read_per_mtok = :c"""),
+                {"p": provider, "m": model, "i": input_per_mtok, "o": output_per_mtok,
+                 "c": cache_read_per_mtok, "at": at},
+            )
+        return at
+
+    def list_pricing(self) -> list[dict]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT * FROM model_pricing ORDER BY provider, model, effective_from DESC")
+            ).mappings().fetchall()
+        return [dict(r) for r in rows]
+
     # ----------------------------------------------------------------------------------------------------------
     # calibrations
     # ----------------------------------------------------------------------------------------------------------

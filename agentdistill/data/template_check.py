@@ -103,6 +103,42 @@ class TemplateReport:
         }
 
 
+def object_arguments(messages: list[dict]) -> list[dict]:
+    """Tool-call arguments as objects, which is the shape a chat template expects.
+
+    Traces store arguments the way the OpenAI wire format does, as a JSON *string*. Chat templates serialize what
+    they are given (`{{ tool_call.arguments | tojson }}`), so handing them the string emits a quoted, escaped
+    string -- `"arguments": "{\"a\": 1}"` -- which the serving stack's parser then recovers as a string rather
+    than a call's arguments. Qwen2.5's template failed `base-check`'s round trip for exactly this reason, and a
+    student trained on that text would emit tool calls the parser drops.
+
+    Copies only the messages it changes, so callers keep their own objects.
+    """
+    out = []
+    for m in messages:
+        calls = m.get("tool_calls")
+        if not calls:
+            out.append(m)
+            continue
+        fixed = []
+        for c in calls:
+            fn = (c or {}).get("function") or {}
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (json.JSONDecodeError, TypeError):
+                    # Unparseable arguments stay as they are: a template that renders them is how a malformed
+                    # call stays visible instead of being silently repaired here.
+                    fixed.append(c)
+                    continue
+                fixed.append({**c, "function": {**fn, "arguments": args}})
+            else:
+                fixed.append(c)
+        out.append({**m, "tool_calls": fixed})
+    return out
+
+
 def render(tok: Any, messages: list[dict], tools: list[dict] | None, add_generation_prompt: bool = False) -> str:
     """One place that calls `apply_chat_template`, so every stage renders identically."""
     kwargs: dict[str, Any] = {
@@ -111,7 +147,7 @@ def render(tok: Any, messages: list[dict], tools: list[dict] | None, add_generat
     }
     if tools:
         kwargs["tools"] = tools
-    return tok.apply_chat_template(messages, **kwargs)
+    return tok.apply_chat_template(object_arguments(messages), **kwargs)
 
 
 def check_prefix_stability(tok: Any, messages: list[dict], tools: list[dict] | None) -> tuple[bool, str]:

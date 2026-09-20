@@ -71,6 +71,14 @@ isolation; the routed name is the one whose behaviour has to stay invisible to t
 **With no adapter in prod, or no usable calibration, requests pass through to the teacher.** The gateway sits
 in front of a working agent and must never be the reason that agent starts behaving differently.
 
+**The gateway scores with exactly the features the calibration was fitted on, in that order.** At boot it reads
+the calibration's `feature_order` (from the registry row, checked against `calibration.json`) and compares it with
+`cascade.features`. The stored order may be a subset -- calibration drops features that had no values -- and then
+the gateway builds the narrower vector. If a fitted feature is not configured, or `cascade.features` lists them in
+a different relative order, the calibration is refused: `/healthz` shows `calibration.state: missing` with the
+fitted and configured orders in `reason`, and every turn escalates. Recalibrate after editing `cascade.features`.
+`eval run cascade:...` applies the same rule, so the cascade that is measured is the one that would serve.
+
 Both dialects are supported: OpenAI at `/v1/chat/completions` and Anthropic at `/v1/messages`. Both are tested
 against the real `openai` and `anthropic` SDKs, including streaming.
 

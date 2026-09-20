@@ -11,7 +11,7 @@ You have access to the following functions. To call one, respond with a JSON obj
 <|start_header_id|>assistant<|end_header_id|>
 
 {{ m.content or '' }}
-{%- for c in m.tool_calls %}{"name": "{{ c.function.name }}", "parameters": {{ c.function.arguments }}}{% endfor %}<|eot_id|>
+{%- for c in m.tool_calls %}{"name": "{{ c.function.name }}", "parameters": {{ c.function.arguments | tojson }}}{% endfor %}<|eot_id|>
 {% elif m.role == 'tool' -%}
 <|start_header_id|>ipython<|end_header_id|>
 

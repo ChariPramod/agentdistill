@@ -34,19 +34,35 @@ dataset:
   window_turns: 12
 
 train:
-  # The repo's fixture tokenizer, so dataset building runs offline. Swap for a real 3B-8B instruct model --
-  # check it with `agentdistill base-check <model>` -- before training anything.
-  base_model: ../../tests/fixtures/tokenizer
+  # Checked with `agentdistill base-check Qwen/Qwen2.5-7B-Instruct`: template renders tools, is prefix-stable, and
+  # the tool call survives the round trip through the hermes parser. Results for every candidate are in
+  # docs/progress.md.
+  base_model: Qwen/Qwen2.5-7B-Instruct
+  # Pinned by commit, never by tag: a tag moves, and then a rerun trains on different weights than the report
+  # says it did. Changing this means rebuilding the dataset -- `train sft` refuses a dataset tokenized elsewhere.
+  base_model_revision: a09a35458c702b33eeacc393d103063234e8bc28
   method: sft
   max_seq_len: 4096
   epochs: 2
   lr: 1.0e-4
   seed: 17
   tool_parser:
-    family: agentdistill_fixture
+    # vLLM's parser name, and the regex family used when vLLM is not installed. base-check detected hermes.
+    name: hermes
+    family: hermes
+
+teacher:
+  # Distillation needs a teacher to distil from and to price against. The key belongs in the environment, with a
+  # hard spend cap set at the provider: the rollout and eval stages call this in a loop.
+  model: claude-opus-5
+  provider: anthropic
+  # Prices come from the registry (`agentdistill pricing set`), so a run is priced by the row in force when it
+  # ran rather than by whatever the config says today.
+  pricing_from_registry: true
 
 eval:
   eval_set: support-holdout-v1
+  calib_set: support-calib-v1
   n_per_task: 5
   policy: strict
   grader: {type: predicate}

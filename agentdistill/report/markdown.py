@@ -18,7 +18,8 @@ def pct(x: float | None) -> str:
 
 
 def num(x: float | None, places: int = 0) -> str:
-    return "n/a" if x is None else f"{x:,.{places}f}"
+    # NaN reads as n/a too: an undefined AUROC from an older row must not print as "nan".
+    return "n/a" if x is None or x != x else f"{x:,.{places}f}"
 
 
 def money(x: float | None, places: int = 4) -> str:
@@ -73,6 +74,49 @@ def provenance_line(prov: dict | None) -> str | None:
     return " ".join(parts) or None
 
 
+def cost_unbatched(r: ReportData) -> bool:
+    """Whether the student's cost comes from an unbatched measurement. Either signal is enough: the code is what
+    `assemble` raised, the mode is what the cost block recorded, and a hand-built report may carry only one."""
+    cost = r.cost or {}
+    return "cost_unbatched" in r.warning_codes or (bool(cost) and cost.get("throughput_mode") != "batched")
+
+
+def onpolicy_summary(o: dict) -> str:
+    """One sentence for the latest on-policy round. Shared by both renderers so a discard reads the same in each."""
+    decision = o.get("decision") or "unknown"
+    verb = {"promote": "promoted", "discard": "discarded", "error": "errored"}.get(decision, decision)
+    text = f"round {o.get('round_idx')} (`{o.get('round_id')}`) from `{o.get('start_adapter')}` was **{verb}**"
+    if o.get("candidate_adapter"):
+        text += f" (candidate `{o['candidate_adapter']}`)"
+    text += f": {o.get('reason') or 'no reason recorded'}."
+    if o.get("insufficient_power") and o["insufficient_power"] not in (o.get("reason") or ""):
+        text += f" The comparison was underpowered: {o['insufficient_power']}."
+    if decision == "discard":
+        text += " One round of RFT plus DPO did not beat its starting adapter on this data; that is a result."
+    return text
+
+
+def onpolicy_details(o: dict) -> list[str]:
+    """The round's inputs as bullet lines: rollouts, fuzzy share, and the pair statistics the cap is checked by."""
+    stats = o.get("pair_stats") or {}
+    lines = [f"- Rollouts: {num(o.get('n_rollouts'))}; fuzzy-replay share {pct(o.get('fuzzy_share'))}"]
+    if stats:
+        lines.append(
+            f"- Pairs: {num(stats.get('n_pairs'))} ({num(stats.get('n_rollout'))} rollout, "
+            f"{num(stats.get('n_teacher'))} teacher); max per task {num(stats.get('max_per_task'))} "
+            f"(cap {num(stats.get('cap_per_task'))})"
+        )
+        if stats.get("per_task_histogram"):
+            hist = ", ".join(f"{k}: {v}" for k, v in stats["per_task_histogram"].items())
+            lines.append(f"- Pairs per task (pairs: tasks): {hist}")
+        if stats.get("diff_kind"):
+            lines.append("- Pair differences: " + ", ".join(f"{k} {v}" for k, v in stats["diff_kind"].items()))
+        lines += [f"- Pair warning: {w}" for w in stats.get("warnings") or []]
+    else:
+        lines.append("- No pair statistics were recorded for this round.")
+    return lines
+
+
 def results_block(r: ReportData) -> str:
     """The block between the markers. Every number sits on a row with its run id."""
     lines = [BEGIN, "", f"_Generated {r.generated_at} on eval set `{r.eval_set}`._", ""]
@@ -101,21 +145,37 @@ def results_block(r: ReportData) -> str:
         lines += [f"**Student vs teacher:** {comparison_text(paired)}", ""]
 
     cascade = (r.cost or {}).get("cascade")
-    if cascade:
+    if cascade and cost_unbatched(r):
+        # Escalation rate and the measurement conditions only: a saving computed from an upper-bound cost is a
+        # number with a known bias and an unknown size, and it would still be quoted.
+        lines += [
+            f"**Cascade** at threshold {cascade['threshold']:.2f}: success {pct(cascade['success'])}, "
+            f"escalation {pct(cascade['escalation_rate'])}. Not priced against the teacher: student throughput "
+            f"was measured under \"{r.cost.get('throughput_conditions', 'unstated')}\", so its cost per token is "
+            f"an upper bound.",
+            "",
+        ]
+    elif cascade:
         lines += [
             f"**Cascade** at threshold {cascade['threshold']:.2f}: success {pct(cascade['success'])}, "
             f"escalation {pct(cascade['escalation_rate'])}, "
             f"{money(cascade['cost_per_task'])}/task against the teacher's "
             f"{money(r.cost.get('teacher_cost_per_task'))} "
             f"({pct(cascade['saving_frac'])} saving). Break-even "
-            f"{num(cascade['breakeven_tasks_per_day'])} tasks/day on the configured GPU.",
+            f"{num(cascade['breakeven_tasks_per_day'])} tasks/day on the configured GPU "
+            f"(throughput: {r.cost.get('throughput_conditions', 'unstated')}).",
             "",
         ]
+
+    if r.onpolicy:
+        lines += [f"**On-policy round:** {onpolicy_summary(r.onpolicy)}", ""]
 
     cal = r.calibration
     if cal and cal.get("holdout"):
         verdict = cal.get("verdict")
         tail = "" if verdict in (None, "usable") else f"; verdict **{verdict}**, so every turn escalates"
+        if cal.get("verdict_reason"):
+            tail += f" ({cal['verdict_reason']})"
         lines += [
             f"**Gate:** holdout AUROC {num(cal['holdout'].get('auroc'), 3)}, "
             f"ECE {num(cal['holdout'].get('ece'), 3)}, threshold {num(cal.get('threshold'), 2)}{tail} "
@@ -172,6 +232,11 @@ def full_markdown(r: ReportData) -> str:
                 f"| {row['cluster']} | {num(row.get('n_tasks'))} | {pct(row.get('base'))} | "
                 f"{pct(row.get('student'))} | {pct(row.get('teacher'))} | {row.get('routing', '')} |"
             )
+        lines.append("")
+
+    if r.onpolicy:
+        lines += ["## On-policy round", "", onpolicy_summary(r.onpolicy), ""]
+        lines += onpolicy_details(r.onpolicy)
         lines.append("")
 
     lin = r.lineage or {}

@@ -12,7 +12,7 @@ For each function call, return a json object within <tool_call></tool_call> tags
 <|im_start|>assistant
 {{ m.content or '' }}
 {%- for c in m.tool_calls or [] %}<tool_call>
-{"name": "{{ c.function.name }}", "arguments": {{ c.function.arguments }}}
+{"name": "{{ c.function.name }}", "arguments": {{ c.function.arguments | tojson }}}
 </tool_call>{% endfor %}<|im_end|>
 {% elif m.role == 'tool' -%}
 <|im_start|>user

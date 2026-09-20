@@ -51,9 +51,7 @@ def tiny_model_dir(tmp_path_factory):
     return out
 
 
-@pytest.fixture
-def tiny_dataset(tmp_path, tokenizer):
-    """A handful of real samples built through the actual masking path."""
+def _write_tiny_dataset(tokenizer, out, tokenizer_id: str):
     from agentdistill.data.build import build_trajectory_sample
     from agentdistill.data.template_check import SAMPLE_MESSAGES, SAMPLE_TOOLS
 
@@ -67,10 +65,22 @@ def tiny_dataset(tmp_path, tokenizer):
         assert s is not None
         samples.append(s)
     artifact = write_dataset(
-        samples, tmp_path / "ds", name="smoke", version=1, tokenizer=str(TOKENIZER_DIR),
-        max_seq_len=256, filter_config={},
+        samples, out, name="smoke", version=1, tokenizer=tokenizer_id, max_seq_len=256, filter_config={},
     )
     return artifact.path
+
+
+@pytest.fixture
+def tiny_dataset(tmp_path, tokenizer):
+    """A handful of real samples built through the actual masking path."""
+    return _write_tiny_dataset(tokenizer, tmp_path / "ds", str(TOKENIZER_DIR))
+
+
+@pytest.fixture
+def tiny_model_dataset(tmp_path, tokenizer, tiny_model_dir):
+    """The same samples, recorded as tokenized for the tiny model: `train_sft` refuses a dataset whose manifest
+    names a different base model, and the tiny model carries a copy of the fixture tokenizer."""
+    return _write_tiny_dataset(tokenizer, tmp_path / "ds_model", str(tiny_model_dir))
 
 
 def test_load_dataset_splits_keeps_only_model_columns(tiny_dataset):
@@ -99,7 +109,7 @@ def test_quantization_config_is_optional():
 
 
 @pytest.mark.slow
-def test_two_steps_on_cpu_saves_a_loadable_adapter(tiny_model_dir, tiny_dataset, tmp_path):
+def test_two_steps_on_cpu_saves_a_loadable_adapter(tiny_model_dir, tiny_model_dataset, tmp_path):
     cfg = {
         "base_model": str(tiny_model_dir),
         "quantization": None,
@@ -118,7 +128,7 @@ def test_two_steps_on_cpu_saves_a_loadable_adapter(tiny_model_dir, tiny_dataset,
         "seed": 17,
         "report_to": [],
     }
-    result = train_sft(cfg, tiny_dataset, tmp_path / "adapter")
+    result = train_sft(cfg, tiny_model_dataset, tmp_path / "adapter")
 
     assert result.steps == 2, "max_steps must be honoured"
     assert (tmp_path / "adapter" / "adapter_model.safetensors").exists(), "LoRA adapter was not saved"

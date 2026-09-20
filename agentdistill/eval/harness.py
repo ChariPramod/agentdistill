@@ -80,35 +80,54 @@ def initial_messages(trace: dict) -> list[dict]:
     return out
 
 
-def run_task(
-    trace: dict,
-    client: TurnClient,
-    provider: ReplayToolProvider,
-    repeat_idx: int = 0,
-    max_turns: int = 12,
-) -> TaskOutcome:
-    """Run one task against the replayed environment."""
-    tools = trace.get("tools") or []
-    messages = initial_messages(trace)
-    started = time.time()
-    n_calls = 0
-    tokens = 0
-    diverged = False
-    divergence: dict | None = None
-    stop_reason = "max_turns"
+class TaskStepper:
+    """One task's trajectory as a state machine: ask it for the next request, feed it the reply.
 
-    for _ in range(max_turns):
-        assistant = {k: v for k, v in client.next_turn(messages, tools).items() if not k.startswith("_")}
+    The sequential `run_task` and the batched lockstep runner both drive this, so there is exactly one copy of the
+    per-turn rules (tool-call replay, malformed arguments, divergence, stop reasons, the turn budget, the token
+    estimate). Two copies would drift, and the batched throughput figure is only worth anything if the batched
+    runner produces the same trajectories as the sequential one.
+    """
+
+    def __init__(self, trace: dict, provider: ReplayToolProvider, repeat_idx: int = 0, max_turns: int = 12) -> None:
+        self.trace, self.provider = trace, provider
+        self.repeat_idx, self.max_turns = repeat_idx, max_turns
+        self.tools = trace.get("tools") or []
+        self.messages = initial_messages(trace)
+        self.started = time.time()
+        self.n_calls = 0
+        self.tokens = 0
+        self.turns_taken = 0
+        self.diverged = False
+        self.divergence: dict | None = None
+        self.stop_reason = "max_turns"
+        self.done = max_turns <= 0
+
+    @property
+    def request(self) -> tuple[list[dict], list[dict]]:
+        """What the client is asked for next: the trajectory so far and the task's tools."""
+        return self.messages, self.tools
+
+    def step(self, reply: dict) -> bool:
+        """Apply one assistant turn. Returns True when the trajectory has ended."""
+        if self.done:
+            raise RuntimeError("step() called on a finished task")
+        self.turns_taken += 1
+        assistant = {k: v for k, v in reply.items() if not k.startswith("_")}
+        messages = self.messages
         messages.append(assistant)
-        tokens += estimate_tokens((assistant.get("content") or "") + json.dumps(assistant.get("tool_calls") or []))
+        self.tokens += estimate_tokens(
+            (assistant.get("content") or "") + json.dumps(assistant.get("tool_calls") or [])
+        )
 
         calls = assistant.get("tool_calls")
         if not calls:
-            stop_reason = "answered"
-            break
+            self.stop_reason = "answered"
+            self.done = True
+            return True
 
         for call in calls:
-            n_calls += 1
+            self.n_calls += 1
             raw = call["function"]["arguments"]
             try:
                 args = json.loads(raw) if isinstance(raw, str) else raw
@@ -122,42 +141,59 @@ def run_task(
                 })
                 continue
             try:
-                content = provider.lookup(call["function"]["name"], args)
+                content = self.provider.lookup(call["function"]["name"], args)
             except Divergence as d:
-                diverged, divergence, stop_reason = True, d.to_dict(), "diverged"
+                self.diverged, self.divergence, self.stop_reason = True, d.to_dict(), "diverged"
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call["id"],
                     "content": json.dumps({"error": "replay divergence: this call was not recorded"}),
                 })
-                break
+                self.done = True
+                return True
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": content})
-        if diverged:
-            break
 
-    final_text = next((m.get("content") or "" for m in reversed(messages) if m["role"] == "assistant"), "")
-    schema_ok, _ = tool_calls_valid({"messages": messages, "tools": tools})
+        if self.turns_taken >= self.max_turns:
+            self.done = True
+        return self.done
 
+    def outcome(self, gate: dict | None = None) -> TaskOutcome:
+        """The finished trajectory as a TaskOutcome. `gate` is a cascade client's per-task summary, if any."""
+        messages, gate = self.messages, gate or {}
+        final_text = next((m.get("content") or "" for m in reversed(messages) if m["role"] == "assistant"), "")
+        schema_ok, _ = tool_calls_valid({"messages": messages, "tools": self.tools})
+        return TaskOutcome(
+            task_id=self.trace.get("task_id") or self.trace["id"],
+            repeat_idx=self.repeat_idx,
+            messages=messages,
+            final_text=final_text,
+            n_turns=sum(1 for m in messages if m["role"] == "assistant"),
+            n_tool_calls=self.n_calls,
+            schema_valid=schema_ok,
+            diverged=self.diverged,
+            divergence=self.divergence,
+            replay_stats=self.provider.summary(),
+            latency_ms=int((time.time() - self.started) * 1000),
+            completion_tokens_est=self.tokens,
+            stop_reason=self.stop_reason,
+            escalations=int(gate.get("escalations", 0)),
+            wasted_student_tokens=int(gate.get("wasted_student_tokens", 0)),
+        )
+
+
+def run_task(
+    trace: dict,
+    client: TurnClient,
+    provider: ReplayToolProvider,
+    repeat_idx: int = 0,
+    max_turns: int = 12,
+) -> TaskOutcome:
+    """Run one task against the replayed environment."""
+    stepper = TaskStepper(trace, provider, repeat_idx=repeat_idx, max_turns=max_turns)
+    while not stepper.done:
+        stepper.step(client.next_turn(*stepper.request))
     # A cascade client knows what the gate did; a plain client does not have a summary and reports zeros.
-    gate = client.summary() if hasattr(client, "summary") else {}
-
-    return TaskOutcome(
-        task_id=trace.get("task_id") or trace["id"],
-        repeat_idx=repeat_idx,
-        messages=messages,
-        final_text=final_text,
-        n_turns=sum(1 for m in messages if m["role"] == "assistant"),
-        n_tool_calls=n_calls,
-        schema_valid=schema_ok,
-        diverged=diverged,
-        divergence=divergence,
-        replay_stats=provider.summary(),
-        latency_ms=int((time.time() - started) * 1000),
-        completion_tokens_est=tokens,
-        stop_reason=stop_reason,
-        escalations=int(gate.get("escalations", 0)),
-        wasted_student_tokens=int(gate.get("wasted_student_tokens", 0)),
-    )
+    return stepper.outcome(client.summary() if hasattr(client, "summary") else {})
 
 
 def tool_calls_made(outcome: TaskOutcome) -> list[tuple[str, dict]]:

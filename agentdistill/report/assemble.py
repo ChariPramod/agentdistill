@@ -25,6 +25,7 @@ from agentdistill.report.registry_views import (
     calibration_for,
     commands_for,
     latest_quantized,
+    latest_round,
     lineage,
     per_cluster_table,
     pricing,
@@ -34,6 +35,16 @@ from agentdistill.report.registry_views import (
 SUBJECT_ORDER = ("base", "student", "teacher", "student_unseen", "teacher_unseen")
 
 
+#: Every warning code the report can carry. `scripts/clean_rehearsal.sh` must place each one as allowed or
+#: forbidden, and a test holds it to that.
+WARNING_CODES = (
+    "tiny_mode", "no_eval_set", "no_run_found", "teacher_skipped", "no_student", "paired_failed",
+    "no_calibration", "gate_not_usable", "gate_degenerate", "cascade_unverified", "quantized_unevaluated",
+    "quantization_missing", "no_teacher_run", "no_teacher_config", "no_pricing", "no_prompt_tokens",
+    "no_throughput", "cost_unbatched", "replay_teacher", "dirty_tree",
+)
+
+
 @dataclass
 class ReportData:
     """Everything a renderer or `assert_report` needs, as plain data.
@@ -41,9 +52,10 @@ class ReportData:
     Warnings are two parallel lists: `warnings` holds the prose the renderers print, and `warning_codes[i]` is
     the stable code for `warnings[i]`. Tooling asserts on codes because prose drifts; keeping the prose list as
     plain strings means no renderer had to change shape. Always add a warning through `warn` so the two stay
-    aligned. The codes in use: tiny_mode, no_eval_set, no_run_found, teacher_skipped, no_student, paired_failed,
-    no_calibration, gate_not_usable, cascade_unverified, quantized_unevaluated, quantization_missing,
-    no_teacher_run, no_teacher_config, no_pricing, no_prompt_tokens, no_throughput, replay_teacher, dirty_tree.
+    aligned. The codes in use are `WARNING_CODES`; `warn` refuses any other.
+
+    `onpolicy` is the latest on-policy round in the report's tag scope, whatever it decided: a discarded round is
+    a finding (one round of RFT plus DPO did not beat SFT on this data), not a missing stage.
     """
 
     generated_at: str
@@ -59,11 +71,16 @@ class ReportData:
     cost: dict = field(default_factory=dict)
     lineage: dict = field(default_factory=dict)
     commands: list = field(default_factory=list)
+    onpolicy: dict = field(default_factory=dict)
     warnings: list = field(default_factory=list)
     warning_codes: list = field(default_factory=list)
     tiny: bool = False
 
     def warn(self, code: str, message: str) -> None:
+        if code not in WARNING_CODES:
+            # A code outside the list is one the rehearsal gate has not placed as allowed or forbidden, so it
+            # would pass that gate silently. Adding it here is the prompt to place it there too.
+            raise ValueError(f"unknown warning code {code!r}; add it to WARNING_CODES and to clean_rehearsal.sh")
         self.warnings.append(message)
         self.warning_codes.append(code)
 
@@ -163,6 +180,7 @@ def assemble(registry: Any, cfg: Any, tag_glob: str | None = None, now_iso: str 
         )
 
     report.cost = cost_block(cfg, registry, teacher, student, report.cascade, report)
+    report.onpolicy = onpolicy_block(latest_round(registry, tag_glob))
     report.commands = commands_for(registry, tag_glob)
     dirty = sum(1 for c in report.commands if (c.get("provenance") or {}).get("dirty") is True)
     if dirty:
@@ -208,8 +226,18 @@ def _calibration(registry: Any, best: dict | None, report: ReportData) -> tuple[
         "threshold": row.get("threshold"), "features": row.get("feature_order") or row.get("features"),
         "ece": holdout_metrics.get("ece"), "auroc": holdout_metrics.get("auroc"), "verdict": verdict,
         "note": (row.get("report") or {}).get("threshold_note") or "",
+        "verdict_reason": (row.get("report") or {}).get("verdict_reason") or "",
     }
-    if verdict is not None and verdict != "usable":
+    if verdict == "degenerate_labels":
+        # A data problem, not a feature problem: the tasks did not separate, so there is nothing to rank. Its own
+        # code, so tiny mode (where a random model gets every turn wrong) can allow it and the GPU day forbid it.
+        reason = calibration["verdict_reason"] or "every labelled turn has the same label"
+        report.warn(
+            "gate_degenerate",
+            f"the confidence gate was fitted on degenerate labels ({reason}), so AUROC is undefined; the gateway "
+            "refuses it and escalates every turn"
+        )
+    elif verdict is not None and verdict != "usable":
         report.warn(
             "gate_not_usable",
             f"the confidence gate's verdict is `{verdict}` (holdout AUROC "
@@ -320,6 +348,17 @@ def cost_block(cfg: Any, registry: Any, teacher: dict | None, student: dict | No
     out["student_only_cost_per_task"] = (student_metrics.get("tokens_est_median") or 0.0) * per_mtok / 1e6
     out["throughput_tok_per_s"] = throughput
     out["throughput_conditions"] = student_metrics.get("throughput_conditions", "unstated")
+    # A run that predates the field was measured by the sequential harness, so missing reads as unbatched.
+    mode = student_metrics.get("throughput_mode") or "unbatched"
+    out["throughput_mode"] = mode
+    unbatched = mode != "batched"
+    if unbatched:
+        report.warn(
+            "cost_unbatched",
+            "student throughput was measured unbatched (one request at a time), so its cost per token is an "
+            "upper bound from sequential measurement and the cascade is not priced against the teacher. Rerun the "
+            "student eval with a batch size to measure a serving figure.",
+        )
 
     verified = cascade.get("verified") or []
     chosen = _chosen_point(verified, cascade.get("threshold"))
@@ -334,10 +373,40 @@ def cost_block(cfg: Any, registry: Any, teacher: dict | None, student: dict | No
             "cost_per_task": cost,
             "success": chosen.get("success"),
             "escalation_rate": chosen.get("escalation_rate"),
-            "saving_frac": saving_fraction(teacher_task, cost),
-            "breakeven_tasks_per_day": breakeven_tasks_per_day(cfg.serve.gpu_usd_per_hour, teacher_task, cost),
+            # Not computed from an upper-bound cost: a saving derived from it would understate the real one by an
+            # unknown factor, and a number that is wrong in a known direction still reads as a finding.
+            "saving_frac": None if unbatched else saving_fraction(teacher_task, cost),
+            "breakeven_tasks_per_day": (None if unbatched
+                                        else breakeven_tasks_per_day(cfg.serve.gpu_usd_per_hour, teacher_task, cost)),
+            "cost_is_upper_bound": unbatched,
             "measured": True,
         }
+    return out
+
+
+def onpolicy_block(row: dict | None) -> dict:
+    """The report's view of one on-policy round row, or {} when no round was ever run."""
+    if not row:
+        return {}
+    stats = row.get("pair_stats") or {}
+    compare = row.get("compare") or {}
+    weak = compare.get("insufficient_power") if isinstance(compare, dict) else None
+    out = {
+        "round_id": row.get("id"),
+        "tag": row.get("tag"),
+        "round_idx": row.get("round_idx"),
+        "start_adapter": row.get("start_adapter_id"),
+        "candidate_adapter": row.get("candidate_adapter"),
+        "eval_run_id": row.get("eval_run_id"),
+        "decision": row.get("decision"),
+        "reason": row.get("reason") or "",
+        "n_rollouts": row.get("n_rollouts"),
+        "fuzzy_share": row.get("fuzzy_share"),
+        "pair_stats": {key: stats.get(key) for key in (
+            "n_pairs", "n_rollout", "n_teacher", "max_per_task", "cap_per_task", "per_task_histogram",
+            "diff_kind", "warnings")} if stats else {},
+        "insufficient_power": (weak or {}).get("reason") if weak else None,
+    }
     return out
 
 

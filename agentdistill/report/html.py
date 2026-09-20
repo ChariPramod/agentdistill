@@ -14,7 +14,16 @@ from html import escape
 from typing import Any
 
 from agentdistill.report.assemble import SUBJECT_ORDER, ReportData
-from agentdistill.report.markdown import comparison_text, money, num, pct, provenance_line
+from agentdistill.report.markdown import (
+    comparison_text,
+    cost_unbatched,
+    money,
+    num,
+    onpolicy_details,
+    onpolicy_summary,
+    pct,
+    provenance_line,
+)
 from agentdistill.report.svg import cost_success_chart, reliability_chart
 
 CSS = """
@@ -59,6 +68,7 @@ def render(r: ReportData) -> str:
         _calibration(r),
         _per_cluster(r),
         _quantization(r),
+        _onpolicy(r),
         _lineage(r),
         _commands(r),
         "</body></html>",
@@ -85,6 +95,13 @@ def _headline(r: ReportData) -> str:
         _metric(pct(student.get("success")), "student success"),
         _metric(pct(teacher.get("success")), "teacher success"),
     ]
+    if cascade and cost_unbatched(r):
+        # No price tiles: the student's cost is an upper bound, and a headline tile is the number people quote.
+        tiles.append(_metric(pct(cascade.get("escalation_rate")), "escalation"))
+        conditions = escape(str(r.cost.get("throughput_conditions", "unstated")))
+        return (f'<div class="headline">{"".join(tiles)}</div>'
+                f'<p class="note">The cascade is not priced against the teacher: student throughput was measured '
+                f"under “{conditions}”, so its cost per token is an upper bound.</p>")
     if cascade:
         tiles += [
             _metric(money(cascade.get("cost_per_task")), "cascade $/task"),
@@ -93,6 +110,21 @@ def _headline(r: ReportData) -> str:
             _metric(pct(cascade.get("escalation_rate")), "escalation"),
         ]
     return f'<div class="headline">{"".join(tiles)}</div>'
+
+
+def _onpolicy(r: ReportData) -> str:
+    o = r.onpolicy or {}
+    if not o:
+        return ""
+    summary = escape(onpolicy_summary(o)).replace("**", "")
+    items = "".join(f"<li>{escape(line[2:])}</li>" for line in onpolicy_details(o))
+    return f"<h2>On-policy round</h2><p>{_code_spans(summary)}</p><ul>{items}</ul>"
+
+
+def _code_spans(escaped: str) -> str:
+    """Backtick spans from the shared markdown sentence, as <code>. Input is already escaped."""
+    parts = escaped.split("`")
+    return "".join(f"<code>{p}</code>" if i % 2 else p for i, p in enumerate(parts))
 
 
 def _subjects(r: ReportData) -> str:
@@ -170,11 +202,12 @@ def _calibration(r: ReportData) -> str:
 
 def _verdict_text(cal: dict) -> str:
     verdict = cal.get("verdict")
+    reason = f" ({escape(cal['verdict_reason'])})" if cal.get("verdict_reason") else ""
     if verdict in (None, "usable"):
-        return f"Verdict {escape(str(verdict))}. " if verdict else ""
+        return f"Verdict {escape(str(verdict))}{reason}. " if verdict else ""
     note = f" {escape(cal['note'])}." if cal.get("note") else ""
-    return (f'<span class="below">Verdict {escape(verdict)}: the gateway refuses this gate and escalates every '
-            f"turn.</span>{note} ")
+    return (f'<span class="below">Verdict {escape(verdict)}{reason}: the gateway refuses this gate and escalates '
+            f"every turn.</span>{note} ")
 
 
 def _per_cluster(r: ReportData) -> str:

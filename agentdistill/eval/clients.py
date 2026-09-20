@@ -113,9 +113,9 @@ class HfTurnClient:
     def next_turn(self, messages: list[dict], tools: list[dict]) -> dict:
         import torch
 
-        prompt = self.tok.apply_chat_template(
-            messages, tools=tools or None, tokenize=False, add_generation_prompt=True
-        )
+        from agentdistill.data.template_check import render
+
+        prompt = render(self.tok, messages, tools or None, add_generation_prompt=True)
         enc = self.tok(prompt, return_tensors="pt", add_special_tokens=False).to(self.model.device)
         kwargs: dict[str, Any] = {
             "max_new_tokens": self.max_new_tokens,
@@ -245,27 +245,49 @@ class VllmOfflineTurnClient:
         self.tok, self.parser_name, self.family = tok, parser_name, family
 
     def _render(self, messages: list[dict], tools: list[dict]) -> str:
-        return self.tok.apply_chat_template(
-            messages, tools=tools or None, tokenize=False, add_generation_prompt=True
-        )
+        from agentdistill.data.template_check import render
+
+        return render(self.tok, messages, tools or None, add_generation_prompt=True)
 
     def next_turn(self, messages: list[dict], tools: list[dict]) -> dict:
-        prompt = self._render(messages, tools)
-        out = self.llm.generate([prompt], self.sp, lora_request=self.lora)
-        turn = parse_assistant(out[0].outputs[0].text, self.tok, self.parser_name, self.family)
-        if self.logprobs:
-            turn["logprobs"] = {"content": _vllm_token_logprobs(out[0].outputs[0])}
-        if self.sample_sp is not None:
-            extra = self.llm.generate([prompt], self.sample_sp, lora_request=self.lora)
-            turn["samples"] = [
-                parse_assistant(o.text, self.tok, self.parser_name, self.family) for o in extra[0].outputs
-            ]
-        return turn
+        return self.next_turns_batch([(messages, tools)])[0]
 
     def next_turns_batch(self, prompts: list[tuple[list[dict], list[dict]]]) -> list[dict]:
+        """One assistant turn per (messages, tools), in input order, from one `LLM.generate` call.
+
+        `next_turn` is this with a batch of one, so both paths render, sample and parse identically. Prompts are
+        rendered with the project's own tokenizer rather than handed to `LLM.chat`: `chat` takes one tools list
+        for the whole batch and renders with vLLM's copy of the template, and either would make a batched turn
+        differ from a sequential one.
+
+        The lockstep runner zips these replies against its live tasks, so the order is checked here, against the
+        prompt each output carries, rather than trusted.
+        """
         texts = [self._render(m, t) for m, t in prompts]
-        outs = self.llm.generate(texts, self.sp, lora_request=self.lora)
-        return [parse_assistant(o.outputs[0].text, self.tok, self.parser_name, self.family) for o in outs]
+        outs = _in_order(self.llm.generate(texts, self.sp, lora_request=self.lora), texts)
+        turns = []
+        for out in outs:
+            turn = parse_assistant(out.outputs[0].text, self.tok, self.parser_name, self.family)
+            if self.logprobs:
+                turn["logprobs"] = {"content": _vllm_token_logprobs(out.outputs[0])}
+            turns.append(turn)
+        if self.sample_sp is not None:
+            extra = _in_order(self.llm.generate(texts, self.sample_sp, lora_request=self.lora), texts)
+            for turn, out in zip(turns, extra, strict=True):
+                turn["samples"] = [parse_assistant(o.text, self.tok, self.parser_name, self.family)
+                                   for o in out.outputs]
+        return turns
+
+
+def _in_order(outs: list[Any], texts: list[str]) -> list[Any]:
+    """vLLM returns outputs in request order; this asserts it, because a shuffled batch would silently give one
+    task another task's turn."""
+    if len(outs) != len(texts):
+        raise AssertionError(f"vLLM returned {len(outs)} outputs for {len(texts)} prompts")
+    for i, (out, text) in enumerate(zip(outs, texts, strict=True)):
+        if getattr(out, "prompt", None) != text:
+            raise AssertionError(f"vLLM output {i} does not belong to prompt {i}; batch order was not preserved")
+    return outs
 
 
 def _vllm_token_logprobs(output: Any) -> list[dict]:

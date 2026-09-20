@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from agentdistill.eval.harness import TaskOutcome, run_task
+from agentdistill.eval.lockstep import LockstepItem, LockstepStats, run_lockstep, supports_batching
 from agentdistill.eval.replay import ReplayStats, ReplayToolProvider
 from agentdistill.eval.stats import (
     InsufficientPower,
@@ -60,8 +61,15 @@ def run_eval(
     spec: RunSpec,
     store_messages: bool = True,
     progress: Callable[[int, int], None] | None = None,
+    batch_size: int | None = None,
 ) -> str:
-    """Run every task `n_per_task` times, grade each, and store the rows. Returns the run id."""
+    """Run every task `n_per_task` times, grade each, and store the rows. Returns the run id.
+
+    `batch_size=None` runs one task at a time. With a batch size, the (task, repeat) items run through the
+    lockstep runner with at most that many in flight -- but only when the client can batch and carries no
+    per-task state; otherwise the run falls back to the sequential path, and its throughput is labelled
+    unbatched either way.
+    """
     run_id = f"ev_{uuid.uuid4().hex[:16]}"
     registry.start_eval_run(run_id, eval_set["id"], spec.subject, spec.n_per_task, tag=spec.tag)
 
@@ -69,33 +77,53 @@ def run_eval(
     total = len(task_ids) * spec.n_per_task
     done = 0
     usage_rows: list[dict[str, int]] = []
-    for trace_id in task_ids:
-        trace = traces_by_task[trace_id]
-        for k in range(spec.n_per_task):
-            # A fresh provider per repeat: replay stats are per-run, and a shared provider would accumulate
-            # counts across repeats and report a divergence rate several times too high.
-            provider = ReplayToolProvider(trace, policy=spec.policy, fuzzy_threshold=spec.fuzzy_threshold)
-            if hasattr(client, "reset"):
-                client.reset()
-            before = dict(getattr(client, "usage", None) or {})
-            outcome = run_task(trace, client, provider, repeat_idx=k, max_turns=spec.max_turns)
-            after = dict(getattr(client, "usage", None) or {})
-            if after:
-                usage_rows.append({k2: after.get(k2, 0) - before.get(k2, 0) for k2 in after})
-            success, detail = grader(trace, outcome)
-            outcome.success = success
-            outcome.grader_detail = str(detail.get("detail", ""))[:500]
-            outcome.grader_out = detail
-            registry.write_eval_result(run_id, outcome, cluster=trace.get("cluster"),
-                                       store_messages=store_messages)
-            done += 1
-            if progress:
-                progress(done, total)
+
+    def record(trace: dict, outcome: TaskOutcome) -> None:
+        nonlocal done
+        success, detail = grader(trace, outcome)
+        outcome.success = success
+        outcome.grader_detail = str(detail.get("detail", ""))[:500]
+        outcome.grader_out = detail
+        registry.write_eval_result(run_id, outcome, cluster=trace.get("cluster"), store_messages=store_messages)
+        done += 1
+        if progress:
+            progress(done, total)
+
+    lockstep = None
+    if batch_size is not None and lockstep_eligible(client):
+        items = [
+            # A fresh provider per repeat, exactly as on the sequential path.
+            LockstepItem(traces_by_task[trace_id],
+                         ReplayToolProvider(traces_by_task[trace_id], policy=spec.policy,
+                                            fuzzy_threshold=spec.fuzzy_threshold),
+                         repeat_idx=k)
+            for trace_id in task_ids for k in range(spec.n_per_task)
+        ]
+        _, lockstep = run_lockstep(items, client, batch_size, max_turns=spec.max_turns,
+                                   on_done=lambda item, outcome: record(item.trace, outcome))
+    else:
+        for trace_id in task_ids:
+            trace = traces_by_task[trace_id]
+            for k in range(spec.n_per_task):
+                # A fresh provider per repeat: replay stats are per-run, and a shared provider would accumulate
+                # counts across repeats and report a divergence rate several times too high.
+                provider = ReplayToolProvider(trace, policy=spec.policy, fuzzy_threshold=spec.fuzzy_threshold)
+                if hasattr(client, "reset"):
+                    client.reset()
+                before = dict(getattr(client, "usage", None) or {})
+                outcome = run_task(trace, client, provider, repeat_idx=k, max_turns=spec.max_turns)
+                after = dict(getattr(client, "usage", None) or {})
+                if after:
+                    usage_rows.append({k2: after.get(k2, 0) - before.get(k2, 0) for k2 in after})
+                record(trace, outcome)
 
     rows = registry.eval_results(run_id)
     metrics, per_cluster = aggregate(rows, traces_by_task)
     metrics.update(usage_metrics(usage_rows))
-    metrics.update(throughput_metrics(rows))
+    batched = lockstep is not None and lockstep.batched
+    metrics.update(batched_throughput_metrics(rows, lockstep) if batched else throughput_metrics(rows))
+    # Recorded even when throughput itself could not be measured, so the report never has to guess the mode.
+    metrics["throughput_mode"] = "batched" if batched else "unbatched"
     if getattr(client, "backend_name", None):
         # A replay stub's numbers are structural. The report keys its disclosure on this field.
         metrics["teacher_backend"] = client.backend_name
@@ -105,6 +133,17 @@ def run_eval(
         metrics.update(cascade_metrics(rows, getattr(client, "threshold", None)))
     registry.finish_eval_run(run_id, metrics, per_cluster)
     return run_id
+
+
+def lockstep_eligible(client: Any) -> bool:
+    """Whether a client can run in lockstep without changing what the run records.
+
+    It has to batch, and it must not keep per-task state: `reset`, a gate `summary`, or running `usage` totals are
+    all read around one task at a time, and interleaving tasks would mix them up. Such clients run sequentially.
+    """
+    if not supports_batching(client):
+        return False
+    return not any(hasattr(client, attr) for attr in ("reset", "summary", "usage"))
 
 
 def usage_metrics(usage_rows: list[dict[str, int]]) -> dict:
@@ -134,7 +173,25 @@ def throughput_metrics(rows: list[dict]) -> dict:
     if not tokens or seconds <= 0:
         return {}
     return {"throughput_tok_per_s": tokens / seconds,
+            "throughput_mode": "unbatched",
             "throughput_conditions": "sequential eval harness, one request at a time (unbatched; overstates cost)"}
+
+
+def batched_throughput_metrics(rows: list[dict], stats: LockstepStats) -> dict:
+    """Completion tokens per second of generation time, measured with real batched calls.
+
+    The denominator is the time spent inside `next_turns_batch`, not the run's wall clock, so replay and grading
+    overhead does not deflate a serving figure. The conditions string carries the batch size, because a
+    throughput without its concurrency is not comparable to anything.
+    """
+    tokens = sum(float(r.get("completion_tokens_est") or 0) for r in rows)
+    if not tokens or stats.generate_seconds <= 0:
+        return {}
+    return {"throughput_tok_per_s": tokens / stats.generate_seconds,
+            "throughput_mode": "batched",
+            "throughput_conditions": f"batched lockstep eval, batch={stats.batch_size}",
+            "lockstep": {"calls": stats.calls, "item_turns": stats.item_turns,
+                         "max_inflight": stats.max_inflight}}
 
 
 def cascade_metrics(rows: list[dict], threshold: float | None) -> dict:

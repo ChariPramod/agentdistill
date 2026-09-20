@@ -8,7 +8,7 @@
 {%- if m.role == 'assistant' -%}
 <|assistant|>
 {{ m.content or '' }}
-{%- for c in m.tool_calls or [] %}<|call|>{{ c.function.name }}{{ c.function.arguments }}<|/call|>{% endfor -%}
+{%- for c in m.tool_calls or [] %}<|call|>{{ c.function.name }}{{ c.function.arguments | tojson }}<|/call|>{% endfor -%}
 <|end|>
 {%- elif m.role == 'tool' -%}
 <|tool_result|>{{ m.content }}<|end|>

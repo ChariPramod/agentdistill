@@ -176,8 +176,8 @@ def load_state(cfg: Any, registry: Any, student: Any = None, teacher: Any = None
         before = len(notes)
         calibration = _load_calibration(cfg, registry, prod["id"], notes)
         if calibration:
-            state.calibrator, state.prod_threshold = calibration
-            state.calibration_state = {"state": "loaded"}
+            state.calibrator, state.prod_threshold, state.feature_names = calibration
+            state.calibration_state = {"state": "loaded", "feature_order": list(state.feature_names)}
         else:
             state.calibration_state = {
                 "state": "missing",
@@ -210,7 +210,14 @@ def load_state(cfg: Any, registry: Any, student: Any = None, teacher: Any = None
 
 
 def _load_calibration(cfg: Any, registry: Any, adapter_id: str, notes: list[str]):
-    from agentdistill.cascade.calibrate import assert_feature_order, load
+    """The prod adapter's gate as (model, threshold, feature order), or None with the reason appended to notes.
+
+    The feature order returned is the one the model was fitted on, not the configured one: the gateway must
+    build exactly that vector. A config that cannot produce it refuses the calibration, so the gateway escalates
+    rather than scoring with columns in the wrong places.
+    """
+    from agentdistill.cascade.calibrate import load
+    from agentdistill.cascade.client import FeatureOrderMismatch, scoring_order
     from agentdistill.registry.select import NoMatch, latest_calibration
 
     try:
@@ -231,11 +238,11 @@ def _load_calibration(cfg: Any, registry: Any, adapter_id: str, notes: list[str]
     if model is None or not report.get("usable", False):
         return None
     try:
-        assert_feature_order(report, cfg.cascade.features)
-    except ValueError as e:
-        notes.append(str(e))
+        order = scoring_order(cfg.cascade.features, report.get("feature_order"), row.get("feature_order"))
+    except FeatureOrderMismatch as e:
+        notes.append(f"calibration {row['id']} refused: {e}")
         return None
-    return model, float(row["threshold"])
+    return model, float(row["threshold"]), order
 
 
 def _load_router(cfg: Any, registry: Any, state: GatewayState, notes: list[str]) -> None:

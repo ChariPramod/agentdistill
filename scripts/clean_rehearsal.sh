@@ -22,14 +22,28 @@ git clean -ndx artifacts "$EX/.agentdistill" "$EX/artifacts" 2>/dev/null | sed '
 
 bash scripts/gpu_day.sh
 
-allow=(--allow-warning tiny_mode --allow-warning replay_teacher --allow-warning uninformative)
+# Every code in agentdistill.report.assemble.WARNING_CODES is placed in exactly one list; a test holds this file
+# to that, because a code in neither would pass silently.
+#
+# Allowed: the disclosures tiny mode is expected to make. A random model's calibration labels are all "bad"
+# (gate_degenerate), its teacher is the replay stub, and the hf client does not batch (cost_unbatched). On the GPU
+# day every one of these except tiny_mode's absence is forbidden -- see docs/gpu-day.md.
+ALLOW=(tiny_mode replay_teacher gate_degenerate cost_unbatched)
+# Forbidden: a hole in the pipeline, which this rehearsal exists to prove there is none of.
+FORBID=(no_eval_set no_run_found teacher_skipped no_student paired_failed no_calibration gate_not_usable
+        cascade_unverified quantized_unevaluated quantization_missing no_teacher_run no_teacher_config no_pricing
+        no_prompt_tokens no_throughput dirty_tree)
 if [[ "${CLEAN_ALLOW_DIRTY:-0}" == "1" ]]; then
-  allow+=(--allow-warning dirty_tree)
+  ALLOW+=(dirty_tree)
+  FORBID=("${FORBID[@]/dirty_tree}")
 fi
+
+args=()
+for code in "${ALLOW[@]}"; do args+=(--allow-warning "$code"); done
+for code in "${FORBID[@]}"; do [[ -n "$code" ]] && args+=(--forbid-warning "$code"); done
 
 python -m agentdistill.tools.assert_report artifacts/gpu_day/report.html \
   --require-subjects base,student,teacher \
-  --require-sections calibration,cascade,cost,quantization \
-  --forbid-warning no_run_found --forbid-warning no_calibration \
-  "${allow[@]}"
+  --require-sections calibration,cascade,cost,quantization,onpolicy \
+  "${args[@]}"
 echo "clean rehearsal ok"

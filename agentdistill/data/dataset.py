@@ -123,7 +123,10 @@ def build_dataset(
         )
 
     filters = filter_config if filter_config is not None else cfg.curation_fingerprint()
-    core = manifest_core(model, _revision(tokenizer), max_seq_len, filters, kind, target)
+    # The pin actually applied to this model, not the config's pin unconditionally: a `--base-model` override
+    # is a different model and was loaded unpinned.
+    pinned = base_revision(cfg, model).get("revision")
+    core = manifest_core(model, _revision(tokenizer), max_seq_len, filters, kind, target, pinned)
     content_hash = compute_content_hash([s.hash() for s in samples], core)
 
     if registry is not None:
@@ -159,6 +162,7 @@ def build_dataset(
         kind=kind,
         tokenizer=model,
         tokenizer_revision=_revision(tokenizer),
+        base_model_revision=pinned,
         max_seq_len=max_seq_len,
         filter_config=filters,
         target=target,

@@ -7,6 +7,7 @@ subcommand name would otherwise be found on rented hardware.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -154,7 +155,7 @@ def test_every_flag_the_script_passes_exists(tmp_path):
 
         help_text = subprocess.run(
             [sys.executable, "-m", "agentdistill.cli", *cmd, "--help"],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, check=False, env={**os.environ, "COLUMNS": "200"},
         ).stdout
         # Rich wraps help output, so collapse whitespace before looking for a flag.
         collapsed = re.sub(r"\s+", " ", help_text)
@@ -244,9 +245,11 @@ def test_every_flag_inside_a_command_substitution_exists():
         cmd = parts[:2] if head in groups and len(parts) > 1 and parts[1] in groups[head] else parts[:1]
         flags = {p for p in m.group(1).split() if p.startswith("--")}
         checked += 1
+        # A wide terminal: Rich truncates a long flag name to `--verify-thresho…` at the default width, and a
+        # truncated flag reads exactly like a missing one.
         help_text = re.sub(r"\s+", " ", subprocess.run(
             [sys.executable, "-m", "agentdistill.cli", *cmd, "--help"],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, check=False, env={**os.environ, "COLUMNS": "200"},
         ).stdout)
         if not help_text:
             missing.append(f"`{' '.join(cmd)}` is not a command")
