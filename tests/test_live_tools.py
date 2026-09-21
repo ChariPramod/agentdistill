@@ -163,3 +163,30 @@ def test_no_renderer_prints_statistics_for_an_incompatible_comparison(populated)
     text = comparison_text(compare(registry, a, b))
     assert "p=" not in text and "pp" not in text
     assert "live" in text and "replay" in text
+
+
+def test_the_corpus_teacher_is_found_at_the_root_of_a_dpo_lineage(registry, tmp_path):
+    """A DPO round's adapter trained on a pairs dataset, which records no corpus teacher. The corpus is the SFT
+    dataset its parent trained on; the first live rehearsal reported "not recorded" because it stopped at the
+    pairs and never looked up the chain."""
+    import json
+
+    from agentdistill.report.assemble import _corpus_teacher
+    from agentdistill.report.registry_views import lineage
+
+    for ds_id, teacher in (("ds_sft", "scripted/rule-based-teacher"), ("ds_pairs", None)):
+        path = tmp_path / ds_id
+        path.mkdir()
+        (path / "manifest.json").write_text(json.dumps({"corpus_teacher": teacher} if teacher else {}))
+        registry.insert_dataset({"id": ds_id, "name": ds_id, "version": 1, "kind": "sft", "filter_config": {},
+                                 "n_samples": 1, "n_tokens": 1, "content_hash": ds_id, "path": str(path)})
+    for run_id, ds_id in (("tr_sft", "ds_sft"), ("tr_dpo", "ds_pairs")):
+        registry.insert_training_run({"id": run_id, "dataset_id": ds_id, "base_model": "m", "method": "sft",
+                                      "config": {}, "status": "succeeded",
+                                      "started_at": "2026-09-21T00:00:00+00:00"})
+    registry.insert_adapter({"id": "ad_sft", "training_run_id": "tr_sft", "name": "s", "version": 1,
+                             "base_model": "m", "path": "/tmp/a"})
+    registry.insert_adapter({"id": "ad_dpo", "training_run_id": "tr_dpo", "name": "s-dpo", "version": 1,
+                             "base_model": "m", "path": "/tmp/b", "parent_adapter_id": "ad_sft"})
+
+    assert _corpus_teacher(registry, lineage(registry, "ad_dpo")) == "scripted/rule-based-teacher"

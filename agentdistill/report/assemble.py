@@ -290,9 +290,34 @@ def _corpus_teacher(registry: Any, lin: dict) -> str | None:
     Read defensively: the field is written by the dataset builder (WP3) and a dataset built before that landed
     has a manifest without it. Missing reads as unknown, never as agreement -- `None` here means the lineage
     prints "not recorded" rather than silently matching whatever is configured.
+
+    Walks the lineage from the adapter up. A DPO or RFT round's own dataset is pairs or rollouts, which carry no
+    corpus teacher: the corpus is the SFT dataset at the root, which an ancestor adapter trained on. So the first
+    dataset in the chain that records one answers, direct dataset first, then each parent's.
     """
-    dataset = (lin or {}).get("dataset") or {}
-    dataset_id = dataset.get("id")
+    candidates = [((lin or {}).get("dataset") or {}).get("id")]
+    for parent in (lin or {}).get("parents") or []:
+        candidates.append(_trained_on(registry, parent.get("id")))
+    for dataset_id in candidates:
+        teacher = _manifest_teacher(registry, dataset_id)
+        if teacher:
+            return teacher
+    return None
+
+
+def _trained_on(registry: Any, adapter_id: str | None) -> str | None:
+    """The dataset an adapter's training run used, or None if the chain cannot be followed."""
+    if not adapter_id:
+        return None
+    try:
+        adapter = next((a for a in registry.list_adapters() if a["id"] == adapter_id), None)
+        run = registry.get_training_run(adapter["training_run_id"]) if adapter else None
+    except Exception:
+        return None
+    return (run or {}).get("dataset_id")
+
+
+def _manifest_teacher(registry: Any, dataset_id: str | None) -> str | None:
     if not dataset_id:
         return None
     try:

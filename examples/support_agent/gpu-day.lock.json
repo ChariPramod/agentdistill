@@ -12,14 +12,14 @@
     "hash": "71e68841e231a32f500e761a4baed707b2406244535c20c1aecb85855139bc43"
   },
   "eval_sets": {
-    "support-calib-v1": "98b405150497",
-    "support-holdout-v1": "dd2d28fd4354",
-    "support-unseen-v1": "6b9e192feb0a"
+    "support-calib-v1": "074669de74a3",
+    "support-holdout-v1": "253a097921eb",
+    "support-unseen-v1": "c80e7e1d8419"
   },
   "lock_version": 1,
   "note": "What the GPU day must reproduce. Written by `agentdistill ops lock write`, checked by `agentdistill ops lock check`. Never edited by hand: a hand-edited lock locks nothing.",
   "sft_dataset": {
-    "content_hash": "dca202f381da5142e5addbf443ca06a4f3408bd273c7da3fb049790c8676e7ea"
+    "content_hash": "7a4bd4ffe877451ccd27b30ca927d943e2b79c3730fdb2c7760a6152bd9a7332"
   },
   "tool_parser": {
     "family": "hermes",

@@ -370,6 +370,21 @@ laptop rehearsal could find it.
 CI runs `mypy agentdistill`; it passed at the start of phase 3d and had 21 errors by phase 3f, none caught because
 no phase ran it. All were narrowing and annotation gaps, not behaviour; it is clean again.
 
+### The lock caught the laptop's registry drifting from the committed recipe (phase 3f, go criterion 3)
+
+The first lock was written from the laptop's registry and pinned dataset `dca202f381da` (342 samples). A fresh
+clone following the same recipe built `7a4bd4ffe877` (334 samples) with different eval-set hashes, while the
+corpus hash matched. The cause was the laptop: its `support-*-v1` eval sets had been registered and frozen on
+Sep 16 from the old, unreproducible corpus, and when the corpus was regenerated from `make_corpus.sh` the freeze
+correctly refused to replace them -- so curation decontaminated against stale eval sets and kept eight traces a
+fresh build rejects. The GPU box would have trained on a dataset that did not match the lock.
+
+The fresh clone is the reference. The laptop's registry and dataset directory were moved aside (to
+`registry.db.stale-20260921` and `artifacts/datasets.stale-20260921`, not deleted), rebuilt from the committed
+recipe, and the lock rewritten; it now pins `7a4bd4ffe877451c` and a fresh clone reproduces it. The general
+lesson: a lock written from a long-lived registry records that registry's history, so the lock is only ever
+written from a registry rebuilt from nothing.
+
 ## Blocked on hardware or credentials
 
 | Item | Blocker |
