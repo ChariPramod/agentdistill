@@ -30,19 +30,16 @@ from agentdistill.report.registry_views import (
     per_cluster_table,
     pricing,
 )
+from agentdistill.report.warnings import CODES
 
 #: Subjects the report shows, in the order it shows them.
 SUBJECT_ORDER = ("base", "student", "teacher", "student_unseen", "teacher_unseen")
 
 
-#: Every warning code the report can carry. `scripts/clean_rehearsal.sh` must place each one as allowed or
-#: forbidden, and a test holds it to that.
-WARNING_CODES = (
-    "tiny_mode", "no_eval_set", "no_run_found", "teacher_skipped", "no_student", "paired_failed",
-    "no_calibration", "gate_not_usable", "gate_degenerate", "cascade_unverified", "quantized_unevaluated",
-    "quantization_missing", "no_teacher_run", "no_teacher_config", "no_pricing", "no_prompt_tokens",
-    "no_throughput", "cost_unbatched", "replay_teacher", "dirty_tree",
-)
+#: Every warning code the report can carry. The list lives in `agentdistill.report.warnings` now -- two things
+#: have to agree about it and neither should import the assembler to find out -- and is re-exported here because
+#: that is where everything already imports it from.
+WARNING_CODES = CODES
 
 
 @dataclass
@@ -67,6 +64,9 @@ class ReportData:
     cascade: dict = field(default_factory=dict)
     calibration: dict = field(default_factory=dict)
     per_cluster: list = field(default_factory=list)
+    #: The measured distortion of replay grading: for each subject evaluated in both tool modes, what each mode
+    #: said. Empty when nothing was run in both, which is the normal case on a day that ran one mode.
+    evaluation_mode: dict = field(default_factory=dict)
     quantization: dict = field(default_factory=dict)
     cost: dict = field(default_factory=dict)
     lineage: dict = field(default_factory=dict)
@@ -110,9 +110,13 @@ def assemble(registry: Any, cfg: Any, tag_glob: str | None = None, now_iso: str 
         report.warn("no_eval_set", "no eval set configured; there is nothing to report")
         return report
 
+    # Every subject in the configured mode, so the paired comparisons are between runs that answer the same
+    # question. The other mode's runs feed only the evaluation-mode section, which exists to show the gap.
+    mode = getattr(cfg.eval, "tools", None)
+
     def find(subject: str, eval_set: str) -> dict | None:
         try:
-            return latest_eval(registry, subject=subject, eval_set=eval_set)
+            return latest_eval(registry, subject=subject, eval_set=eval_set, eval_mode=mode)
         except NoMatch:
             return None
 
@@ -155,7 +159,22 @@ def assemble(registry: Any, cfg: Any, tag_glob: str | None = None, now_iso: str 
         record("teacher_unseen", find("teacher", report.unseen_set))
 
     report.paired = _paired(registry, student, teacher, base, report)
+    report.evaluation_mode = evaluation_mode_block(registry, holdout)
     report.calibration, report.cascade = _calibration(registry, best, report)
+
+    for name, cmp in report.paired.items():
+        marker = cmp.get("incompatible")
+        if not marker:
+            continue
+        # `compare` already refused this one, so nothing numeric got through. The warning exists so a reader of
+        # the report knows a comparison was expected here and why there is none.
+        report.warn(
+            "eval_mode_mismatch",
+            f"{name.replace('_', ' ')} was not compared: `{cmp['run_a']}` ran with {marker['eval_mode_a']} "
+            f"tools and `{cmp['run_b']}` with {marker['eval_mode_b']}. Replay grading counts a valid "
+            f"alternative tool call as a divergence and live grading does not, so the difference between the "
+            f"runs is not a difference between the subjects.",
+        )
 
     if best:
         report.per_cluster = per_cluster_table(
@@ -170,6 +189,7 @@ def assemble(registry: Any, cfg: Any, tag_glob: str | None = None, now_iso: str 
             quantization_configured=bool(getattr(getattr(cfg, "serve", None), "quantization", None)),
         )
         report.lineage = lineage(registry, best["id"])
+        _teacher_provenance(registry, cfg, report)
 
     if teacher and (teacher.get("metrics") or {}).get("teacher_backend") == "replay":
         # Raised here, not in cost_block, so the disclosure survives any path that skips the cost section: a
@@ -190,6 +210,110 @@ def assemble(registry: Any, cfg: Any, tag_glob: str | None = None, now_iso: str 
             "commit",
         )
     return report
+
+
+def evaluation_mode_block(registry: Any, eval_set: str) -> dict:
+    """What replay grading costs, measured rather than argued.
+
+    Replay serves the results the recording holds and calls anything else a divergence, so a subject that solves
+    a task by a route the recording did not take fails it. That is a property of the instrument, not of the
+    subject, and the only way to say how large it is on this eval set is to run the same subject both ways. For
+    every subject with a run in each mode this reports live success, replay success, and the replay run's
+    divergence rate -- the share of trajectories replay stopped early.
+
+    Runs are never paired across modes (`compare` refuses that), so nothing here is a statistic: these are the
+    two observed rates, side by side, labelled as the distortion of replay grading.
+    """
+    from agentdistill.eval.runner import eval_mode
+
+    runs = [r for r in registry.list_eval_runs()
+            if r.get("eval_set_id") in (eval_set, f"es_{eval_set}")]
+    by_subject: dict[str, dict[str, dict]] = {}
+    for run in runs:  # newest first, so the first run seen for a (subject, mode) is the one to report
+        by_subject.setdefault(run["subject"], {}).setdefault(eval_mode(run), run)
+
+    subjects = []
+    for subject in sorted(by_subject):
+        modes = by_subject[subject]
+        if not ("live" in modes and "replay" in modes):
+            continue
+        live, replay = modes["live"], modes["replay"]
+        lm, rm = live.get("metrics") or {}, replay.get("metrics") or {}
+        live_success, replay_success = lm.get("success"), rm.get("success")
+        subjects.append({
+            "subject": subject,
+            "live_run": live["id"],
+            "replay_run": replay["id"],
+            "live_success": live_success,
+            "replay_success": replay_success,
+            "replay_divergence_rate": rm.get("divergence_rate"),
+            "distortion_pp": ((live_success - replay_success) * 100
+                              if live_success is not None and replay_success is not None else None),
+        })
+    if not subjects:
+        return {}
+    return {
+        "eval_set": eval_set,
+        "subjects": subjects,
+        "note": (
+            "The gap is the measured distortion of replay grading on this eval set, not a difference between "
+            "subjects: the same subject ran both ways. Replay counts a valid alternative tool call as a "
+            "divergence and stops the trajectory there."
+        ),
+    }
+
+
+def _teacher_provenance(registry: Any, cfg: Any, report: ReportData) -> None:
+    """Print who wrote the corpus and who serves today, side by side.
+
+    A student trained on traces from one model and compared against another is not being measured as a
+    distillation of the model it is compared to. That can be a perfectly good operational question -- can this
+    student replace this teacher in production -- but it is a different claim, and the report has to make the
+    difference visible rather than let "student vs teacher" imply the stronger one.
+    """
+    corpus = _corpus_teacher(registry, report.lineage)
+    serving = getattr(cfg.teacher, "model", None) if getattr(cfg, "teacher", None) else None
+    report.lineage["corpus_teacher"] = corpus
+    report.lineage["serving_teacher"] = serving
+    if corpus and serving and corpus != serving:
+        report.warn(
+            "corpus_teacher_differs",
+            f"the training corpus was written by `{corpus}` and the teacher being compared against and priced "
+            f"is `{serving}`. The student imitates the corpus teacher, so this comparison is operational -- can "
+            f"this student replace that teacher -- and not a measurement of distillation from it.",
+        )
+
+
+def _corpus_teacher(registry: Any, lin: dict) -> str | None:
+    """The model the training corpus came from, from the dataset manifest.
+
+    Read defensively: the field is written by the dataset builder (WP3) and a dataset built before that landed
+    has a manifest without it. Missing reads as unknown, never as agreement -- `None` here means the lineage
+    prints "not recorded" rather than silently matching whatever is configured.
+    """
+    dataset = (lin or {}).get("dataset") or {}
+    dataset_id = dataset.get("id")
+    if not dataset_id:
+        return None
+    try:
+        row = next((d for d in registry.list_datasets() if d["id"] == dataset_id), None)
+    except Exception:
+        return None
+    if not row:
+        return None
+    manifest = row.get("manifest")
+    if not isinstance(manifest, dict):
+        path = row.get("path")
+        if not path:
+            return None
+        try:
+            from agentdistill.data.artifact import read_manifest
+
+            manifest = read_manifest(path)
+        except Exception:
+            return None
+    teacher = manifest.get("corpus_teacher")
+    return str(teacher) if teacher else None
 
 
 def _paired(registry: Any, student: dict | None, teacher: dict | None, base: dict | None,
@@ -402,9 +526,13 @@ def onpolicy_block(row: dict | None) -> dict:
         "reason": row.get("reason") or "",
         "n_rollouts": row.get("n_rollouts"),
         "fuzzy_share": row.get("fuzzy_share"),
+        # A round row predating tool modes ran against replayed tools, which is the only mode that existed.
+        "tools_mode": stats.get("tools_mode") or "replay",
+        # `tools_mode` rides in the same JSON column but is not a pair statistic: a round that built no pairs
+        # still records the mode it ran under, and must still report no pair statistics.
         "pair_stats": {key: stats.get(key) for key in (
             "n_pairs", "n_rollout", "n_teacher", "max_per_task", "cap_per_task", "per_task_histogram",
-            "diff_kind", "warnings")} if stats else {},
+            "diff_kind", "warnings")} if stats.get("n_pairs") is not None else {},
         "insufficient_power": (weak or {}).get("reason") if weak else None,
     }
     return out

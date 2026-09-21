@@ -18,7 +18,7 @@ from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.exc import OperationalError
 
 MIGRATIONS = Path(__file__).resolve().parent / "migrations"
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 #: Migrations are applied in order; each is idempotent.
 MIGRATION_FILES = (
@@ -29,6 +29,7 @@ MIGRATION_FILES = (
     "005_prompt_tokens.sql",
     "006_rft_kind.sql",
     "007_phase3d.sql",
+    "008_retire.sql",
 )
 
 
@@ -664,7 +665,11 @@ class Registry:
             "candidate_adapter": round_row.get("candidate_adapter"),
             "eval_run_id": ids.get("eval_run"),
             "compare": dumps(round_row.get("compare")),
-            "pair_stats": dumps(round_row.get("pair_kinds") or None),
+            # tools_mode rides in the stats JSON rather than a column of its own: it is one string per round and
+            # the report reads it beside the pair statistics. A round row that does not say which tool mode it
+            # ran under cannot be read at all -- a zero fuzzy share means nothing without it.
+            "pair_stats": dumps({**(round_row.get("pair_kinds") or {}),
+                                 "tools_mode": round_row.get("tools_mode") or "replay"}),
             "decision": round_row.get("decision"),
             "reason": (round_row.get("reason") or "")[:1000],
             "started_at": utcnow(),

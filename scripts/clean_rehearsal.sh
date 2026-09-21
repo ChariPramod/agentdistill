@@ -28,11 +28,14 @@ bash scripts/gpu_day.sh
 # Allowed: the disclosures tiny mode is expected to make. A random model's calibration labels are all "bad"
 # (gate_degenerate), its teacher is the replay stub, and the hf client does not batch (cost_unbatched). On the GPU
 # day every one of these except tiny_mode's absence is forbidden -- see docs/gpu-day.md.
-ALLOW=(tiny_mode replay_teacher gate_degenerate cost_unbatched)
+# corpus_teacher_differs is a true and permanent disclosure for this example: the corpus was recorded from a
+# scripted solver, so the student imitates that solver and the teacher comparison is operational rather than
+# distillation. It stays allowed until the corpus is re-recorded from the serving teacher.
+ALLOW=(tiny_mode replay_teacher gate_degenerate cost_unbatched corpus_teacher_differs)
 # Forbidden: a hole in the pipeline, which this rehearsal exists to prove there is none of.
 FORBID=(no_eval_set no_run_found teacher_skipped no_student paired_failed no_calibration gate_not_usable
         cascade_unverified quantized_unevaluated quantization_missing no_teacher_run no_teacher_config no_pricing
-        no_prompt_tokens no_throughput dirty_tree)
+        no_prompt_tokens no_throughput dirty_tree eval_mode_mismatch)
 if [[ "${CLEAN_ALLOW_DIRTY:-0}" == "1" ]]; then
   ALLOW+=(dirty_tree)
   FORBID=("${FORBID[@]/dirty_tree}")

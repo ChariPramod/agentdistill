@@ -22,6 +22,7 @@ import hashlib
 import json
 import random
 from collections import Counter
+from typing import Any
 
 from agentdistill.data.pairs import first_divergent_pair, turn_key
 from agentdistill.train.dpo_data import diff_kind, pair_is_valid
@@ -88,15 +89,16 @@ def build_pairs(rollouts_by_task: dict[str, list[dict]], teacher_by_task: dict[s
     # Recount after the teacher cap, so the histogram describes the pairs that are actually trained on.
     kept = Counter(p["task_id"] for p in pairs)
     diff = dict(Counter(p["diff_kind"] for p in pairs))
-    stats = {
+    warnings: list[str] = []
+    stats: dict[str, Any] = {
         "n_pairs": len(pairs), "n_rollout": len(rollout_pairs), "n_teacher": len(teacher_pairs),
         "cap_per_task": cap_per_task, "teacher_pair_ratio": teacher_pair_ratio,
         "tasks_with_pairs": sum(1 for v in kept.values() if v), "max_per_task": max(kept.values(), default=0),
         "diff_kind": diff, "per_task_histogram": {str(k): v for k, v in sorted(Counter(kept.values()).items())},
-        "warnings": [],
+        "warnings": warnings,
     }
     if pairs and diff.get("text", 0) / len(pairs) > MAX_TEXT_SHARE:
-        stats["warnings"].append(
+        warnings.append(
             f"{diff['text'] / len(pairs):.0%} of pairs differ only in prose (above {MAX_TEXT_SHARE:.0%}); this set "
             f"teaches phrasing rather than decisions"
         )

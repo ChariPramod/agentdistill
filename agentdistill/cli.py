@@ -551,6 +551,107 @@ def eval_latest(
     print(row["id"])
 
 
+registry_app = typer.Typer(no_args_is_help=True, help="Registry maintenance: retirement and repair.")
+app.add_typer(registry_app, name="registry")
+ops_app = typer.Typer(no_args_is_help=True, help="GPU-day operations: the lock file, spend, and the export.")
+app.add_typer(ops_app, name="ops")
+lock_app = typer.Typer(no_args_is_help=True, help="What the GPU day must reproduce.")
+ops_app.add_typer(lock_app, name="lock")
+
+
+@registry_app.command("retire")
+def registry_retire(
+    built_before: str = typer.Option(
+        ..., "--built-before", help="ISO timestamp or a commit (HEAD, a sha); rows built before it are retired."
+    ),
+    reason: str = typer.Option(..., help="Why. Recorded on every row and as an adapter event."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print what would be retired and write nothing."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Mark datasets and adapters built before a fix as retired, so no selector can hand them to a later stage.
+
+    The rows stay: the registry is the record of what was run. What changes is that `dataset latest`,
+    `adapter best|latest`, the prod and canary selectors, and the report's selectors all skip them.
+    """
+    from agentdistill.cli_stage import StageOutcome
+    from agentdistill.registry.retire import RetireError, retire
+
+    reg = _registry(_load(config))
+    try:
+        result = retire(reg, built_before=built_before, reason=reason, dry_run=dry_run)
+    except RetireError as e:
+        err.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+
+    console.print(result.render())
+    if dry_run:
+        _stage("registry retire", StageOutcome(
+            False, "", skipped_reason=f"--dry-run: {len(result.retired)} row(s) would be retired"
+        ), allow_skip=True)
+        return
+    if not result.retired:
+        _stage("registry retire", StageOutcome(
+            False, "", skipped_reason=f"nothing built before {result.cutoff} is unretired "
+                                      f"({len(result.already_retired)} already retired, {len(result.kept)} kept)"
+        ), allow_skip=True)
+        return
+    _stage("registry retire", StageOutcome(True, f"retired {len(result.retired)} row(s): "
+                                                 f"{', '.join(r.id for r in result.retired)}"))
+
+
+@lock_app.command("write")
+def ops_lock_write(
+    path: str | None = typer.Option(None, help="Where to write it. Defaults beside the config."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Record what the GPU day must reproduce: model, revision, parser, corpus, dataset, and eval-set hashes."""
+    from agentdistill.ops import lock
+
+    raise typer.Exit(code=lock.write(config, path))
+
+
+@lock_app.command("check")
+def ops_lock_check(
+    path: str | None = typer.Option(None, help="The lock file. Defaults beside the config."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """Compare the lock against this tree and registry. Exit 1 with a diff on any mismatch."""
+    from agentdistill.ops import lock
+
+    raise typer.Exit(code=lock.check(config, path))
+
+
+@ops_app.command("estimate-spend")
+def ops_estimate_spend(
+    unseen: str = typer.Option("support-unseen-v1", help="The unseen eval set, for its share of the estimate."),
+    n_per_task: int | None = typer.Option(None, "--n", help="Repeats per task; defaults to eval.n_per_task."),
+    config: str = typer.Option("project.yaml"),
+) -> None:
+    """What the teacher will cost on the GPU day, priced from the registry's row, with a recommended cap."""
+    from agentdistill.ops import spend
+
+    cfg = _load(config)
+    try:
+        result = spend.estimate(cfg, _registry(cfg), unseen=unseen, n_per_task=n_per_task)
+    except (RuntimeError, LookupError) as e:
+        err.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+    console.print(spend.render(result), markup=False, highlight=False)
+
+
+@ops_app.command("verify-export")
+def ops_verify_export(
+    tarball: str = typer.Argument(..., help="The export tarball copied off the box."),
+    checksum: str | None = typer.Option(None, help="Its .sha256; defaults to <tarball>.sha256."),
+) -> None:
+    """Check an export before the box is terminated: checksum, contents, and the registry's run ids."""
+    from pathlib import Path as _Path
+
+    from agentdistill.ops import verify_export
+
+    raise typer.Exit(code=verify_export.verify(_Path(tarball), _Path(checksum) if checksum else None))
+
+
 pricing_app = typer.Typer(no_args_is_help=True, help="Model prices the cost report reads.")
 app.add_typer(pricing_app, name="pricing")
 
@@ -879,6 +980,11 @@ def train_onpolicy(
     tag: str | None = typer.Option(None, help="Groups this session's artifacts for the selectors."),
     k: int | None = typer.Option(None, "--k", help="Rollouts per task."),
     backend: str = typer.Option("hf", help="Inference backend for rollouts and merge verification."),
+    tools: str | None = typer.Option(
+        None, "--tools",
+        help="live rolls out against the project's real tools; replay serves recorded results. Defaults to "
+             "onpolicy.tools.",
+    ),
     dry_run: bool = typer.Option(False, help="Print the stage plan and stop."),
     config: str = typer.Option("project.yaml"),
 ) -> None:
@@ -894,12 +1000,17 @@ def train_onpolicy(
     reg = _registry(cfg)
 
     op = cfg.onpolicy
+    rollout_mode = tools or op.tools
+    if rollout_mode not in ("live", "replay"):
+        err.print(f"[red]--tools must be live or replay, not {rollout_mode!r}[/red]")
+        raise typer.Exit(code=1)
     round_cfg = RoundCfg(
         k_rollouts=k or op.k_rollouts,
         rft_cap_per_task=op.rft_cap_per_task,
         min_pairs=op.min_pairs,
         max_fuzzy_share=op.max_fuzzy_share,
         pair_cap_per_task=op.pair_cap_per_task,
+        tools=rollout_mode,
     )
 
     # Teacher traces only: these become the `teacher_by_task` the round builds preference pairs against, and a
@@ -992,6 +1103,9 @@ def _onpolicy_stages(cfg, reg, tag, round_cfg, backend: str = "hf"):
         rollouts = collect_rollouts(
             [t for t in traces if t], client, grader, k=k, policy=policy,
             fuzzy_threshold=round_cfg.max_fuzzy_share, adapter_id=adapter,
+            # Rollouts are graded the same way the eval is, or a round would be judged against a different
+            # question than the one that decides whether to keep it.
+            tools=round_cfg.tools, env_source=cfg.eval.grader.predicate_source,
         )
         state["rollouts"] = rollouts
         return {"rollouts": rollouts.rollouts, "fuzzy_share": rollouts.replay.get("fuzzy_share", 0.0),
@@ -1318,7 +1432,12 @@ def eval_run(
     subject: str = typer.Argument(..., help="Adapter name, 'base', 'recorded', or 'http:<model>@<url>'."),
     eval_set: str | None = typer.Option(None, help="Eval set name; defaults to eval.eval_set."),
     n: int | None = typer.Option(None, "--n", help="Repeats per task."),
-    policy: str = typer.Option("strict", help="strict or fuzzy replay."),
+    policy: str = typer.Option("strict", help="strict or fuzzy replay. Ignored when --tools is live."),
+    tools: str | None = typer.Option(
+        None, "--tools",
+        help="live runs the project's real tools and grades the final state; replay serves recorded results. "
+             "Defaults to eval.tools.",
+    ),
     backend: str = typer.Option("hf", help="hf, vllm, http, or replay (teacher only: the tiny-mode stub)."),
     max_turns: int = typer.Option(12),
     fuzzy_threshold: float = typer.Option(0.92),
@@ -1378,6 +1497,10 @@ def eval_run(
         )
         raise typer.Exit(code=1)
 
+    mode = tools or cfg.eval.tools
+    if mode not in ("live", "replay"):
+        err.print(f"[red]--tools must be live or replay, not {mode!r}[/red]")
+        raise typer.Exit(code=1)
     spec = RunSpec(
         subject=subject,
         eval_set=name,
@@ -1386,6 +1509,8 @@ def eval_run(
         max_turns=max_turns,
         fuzzy_threshold=fuzzy_threshold,
         tag=tag,
+        tools=mode,
+        env_source=cfg.eval.grader.predicate_source,
     )
     console.print(f"[bold]eval[/bold] {subject} on {name}: {len(traces_by_task)} tasks x {spec.n_per_task}")
 
@@ -1454,9 +1579,9 @@ def _report_threshold_verification(reg: Any, run: dict, subject: str) -> dict | 
 
     # The measured point is what the report's cascade section and cost block read. It is stored on the
     # calibration it verifies, beside the analytic estimate it replaces.
+    measured_tau = metrics.get("cascade_threshold")
     point = {
-        "threshold": float(metrics.get("cascade_threshold") if metrics.get("cascade_threshold") is not None
-                           else row["threshold"]),
+        "threshold": float(measured_tau if measured_tau is not None else row["threshold"]),
         "success": metrics.get("success"),
         "escalation_rate": measured,
         "wasted_student_tokens": metrics.get("wasted_student_tokens_median", 0.0),
@@ -1813,6 +1938,8 @@ def calibrate(
                               max_success_drop_pp=budget)
     verdict, verdict_reason = gate_verdict(result, int(y.sum()), choice.chosen is not None)
     use = verdict == "usable" and choice.chosen is not None
+    # The chosen point, only when the verdict lets it be used; None otherwise, and every reader below says so.
+    chosen = choice.chosen if use else None
     cal_id = reg.insert_calibration({
         "adapter_id": adapter_row["id"],
         "eval_run_id": run["id"],
@@ -1820,14 +1947,14 @@ def calibrate(
         "model_path": str(path),
         # 1.0 keeps the student only at certainty, which is escalate-everything in practice; the verdict is
         # what actually stops a non-usable gate from being loaded.
-        "threshold": choice.chosen.threshold if use else 1.0,
+        "threshold": chosen.threshold if chosen else 1.0,
         "target": {"max_success_drop_pp": budget},
-        "escalation_rate": choice.chosen.escalation_rate if use else 1.0,
+        "escalation_rate": chosen.escalation_rate if chosen else 1.0,
         "holdout_metrics": result.holdout,
         "reliability_bins": result.reliability_bins,
         "verdict": verdict,
         "report": {
-            "predicted_escalation_rate": choice.chosen.escalation_rate if use else 1.0,
+            "predicted_escalation_rate": chosen.escalation_rate if chosen else 1.0,
             "verdict_reason": verdict_reason,
             "threshold_note": choice.note,
             "notes": result.notes,
@@ -1838,20 +1965,20 @@ def calibrate(
         },
     })
 
-    if not use:
+    if chosen is None:
         why = verdict_reason if verdict != "no_threshold" else (choice.note or verdict_reason)
         console.print(f"[yellow]gate verdict: {verdict}.[/yellow] The cascade escalates every turn and the "
                       f"report says so. ({why})")
     else:
         console.print(
-            f"threshold {choice.chosen.threshold:.2f}  escalation {choice.chosen.escalation_rate:.0%}  "
-            f"estimated success {choice.chosen.cascade_success:.1%}"
+            f"threshold {chosen.threshold:.2f}  escalation {chosen.escalation_rate:.0%}  "
+            f"estimated success {chosen.cascade_success:.1%}"
         )
         console.print(
             "  [dim]analytic estimate; it assumes an escalated turn is as good as the teacher's, which is "
             "optimistic because the teacher answers on a prefix the student built. Verify with "
             f"`eval run cascade:{adapter}:auto --verify-threshold` at "
-            f"{verification_points(choice.chosen.threshold)}.[/dim]"
+            f"{verification_points(chosen.threshold)}.[/dim]"
         )
     _stage("calibrate", StageOutcome(True, f"calibration {cal_id} for {adapter_row['name']}, verdict {verdict}, "
                                            f"{result.n_turns} turns"))

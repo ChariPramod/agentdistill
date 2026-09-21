@@ -6,6 +6,12 @@ the wrong row, or an empty string, silently trains or evaluates the wrong thing.
 
 All of them raise `NoMatch` rather than returning None. On the GPU box a clear failure costs a rerun; a blank
 substitution costs the session.
+
+None of them will return a **retired** row. A row is retired when it was built before a fix that made it
+invalid -- the render-boundary fix is the first such case -- and the whole point of marking it rather than
+deleting it is that it stays in the record and out of the selectors. Filtering happens here, at the bottom, so a
+selector cannot be added later that forgets: `agentdistill/registry/retire.py` writes the mark, this module and
+`report/registry_views.py` are the only places that read it.
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ from typing import Any
 from sqlalchemy import text
 
 from agentdistill.registry.base import loads
+from agentdistill.registry.retire import drop_retired
 
 
 class NoMatch(LookupError):
@@ -46,8 +53,8 @@ def _tag_filter(rows: list[dict], tag: str | None) -> list[dict]:
 
 
 def latest_dataset(registry: Any, name: str | None = None, kind: str | None = None) -> dict:
-    """The newest dataset version, optionally filtered by name and kind."""
-    rows = _rows(registry, "SELECT * FROM datasets ORDER BY created_at DESC, version DESC")
+    """The newest dataset version, optionally filtered by name and kind. Never a retired one."""
+    rows = drop_retired(_rows(registry, "SELECT * FROM datasets ORDER BY created_at DESC, version DESC"))
     if name:
         rows = [r for r in rows if r["name"] == name]
     if kind:
@@ -68,7 +75,7 @@ def latest_adapter(
     registry: Any, tag: str | None = None, status: str | None = None, quantized: bool | None = None
 ) -> dict:
     rows = _tag_filter(
-        _rows(registry, "SELECT * FROM adapters ORDER BY created_at DESC, version DESC"), tag
+        drop_retired(_rows(registry, "SELECT * FROM adapters ORDER BY created_at DESC, version DESC")), tag
     )
     if status:
         rows = [r for r in rows if r["status"] == status]
@@ -89,8 +96,16 @@ def best_adapter(registry: Any, tag: str | None = None, eval_set: str | None = N
     Quantized artifacts are never candidates. They are derived from the best adapter and measured against it; on
     a noisy eval one can outscore its own parent, and then the report would call it the student while every
     calibration and quantization row hangs off the parent.
+
+    Nor is a retired one, and for a sharper reason: a retired adapter usually still has its eval run, so it can
+    still be the highest-scoring row here. Measured success is not evidence against an adapter whose *output
+    format* is invalid -- the eval scored text the serving stack would have dropped.
     """
-    adapters = [a for a in _tag_filter(_rows(registry, "SELECT * FROM adapters"), tag) if not a.get("quantization")]
+    adapters = [
+        a
+        for a in _tag_filter(drop_retired(_rows(registry, "SELECT * FROM adapters")), tag)
+        if not a.get("quantization")
+    ]
     if not adapters:
         raise NoMatch(f"no adapter matching tag={tag!r}")
 
@@ -128,16 +143,26 @@ def _eval_runs(registry: Any) -> list[dict]:
 
 
 def latest_eval(
-    registry: Any, subject: str | None = None, tag: str | None = None, eval_set: str | None = None
+    registry: Any, subject: str | None = None, tag: str | None = None, eval_set: str | None = None,
+    eval_mode: str | None = None,
 ) -> dict:
+    """The newest eval run matching every filter given.
+
+    `eval_mode` matters wherever runs are paired: the GPU day evaluates the teacher in both modes on purpose, and
+    "the latest teacher run" is then the replay one, which cannot be compared with a live student at all. A run
+    recorded before tool modes existed was replay, the only mode there was.
+    """
     rows = _eval_runs(registry)
     if subject:
         rows = [r for r in rows if r["subject"] == subject]
     rows = _tag_filter(rows, tag)
     if eval_set:
         rows = [r for r in rows if r["eval_set_id"] in (eval_set, f"es_{eval_set}")]
+    if eval_mode:
+        rows = [r for r in rows if ((r.get("metrics") or {}).get("eval_mode") or "replay") == eval_mode]
     if not rows:
-        raise NoMatch(f"no eval run matching subject={subject!r} tag={tag!r} eval_set={eval_set!r}")
+        raise NoMatch(f"no eval run matching subject={subject!r} tag={tag!r} eval_set={eval_set!r}"
+                      + (f" eval_mode={eval_mode!r}" if eval_mode else ""))
     return rows[0]
 
 
@@ -191,14 +216,14 @@ def rounds_for_tag(registry: Any, tag: str) -> list[dict]:
 
 
 def prod_adapter(registry: Any) -> dict | None:
-    rows = _rows(registry, "SELECT * FROM adapters WHERE status = 'prod' ORDER BY created_at DESC")
+    rows = drop_retired(_rows(registry, "SELECT * FROM adapters WHERE status = 'prod' ORDER BY created_at DESC"))
     if len(rows) > 1:
         raise Ambiguous(f"{len(rows)} adapters are marked prod; exactly one may be")
     return rows[0] if rows else None
 
 
 def canary_adapter(registry: Any) -> dict | None:
-    rows = _rows(registry, "SELECT * FROM adapters WHERE status = 'canary' ORDER BY created_at DESC")
+    rows = drop_retired(_rows(registry, "SELECT * FROM adapters WHERE status = 'canary' ORDER BY created_at DESC"))
     return rows[0] if rows else None
 
 

@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 
@@ -85,10 +86,10 @@ def section_problem(name: str, data: dict) -> str | None:
 
 def check(
     data: dict,
-    require_subjects: list[str] = (),
-    require_sections: list[str] = (),
-    forbid: list[str] = (),
-    allow: list[str] = (),
+    require_subjects: Sequence[str] = (),
+    require_sections: Sequence[str] = (),
+    forbid: Sequence[str] = (),
+    allow: Sequence[str] = (),
 ) -> list[str]:
     """Every failure as one line; empty means the report passes."""
     failures: list[str] = []

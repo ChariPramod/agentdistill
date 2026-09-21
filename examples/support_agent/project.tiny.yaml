@@ -62,11 +62,14 @@ teacher:
   output_per_mtok: 15.0
 
 eval:
+  # Live tools, like the real config: the tiny CRM is the same local, deterministic, seeded database, so the
+  # rehearsal exercises the path the GPU day uses rather than a second one that only exists here.
+  tools: live
   eval_set: support-holdout-tiny
   calib_set: support-calib-tiny
   n_per_task: 1
   policy: strict
-  grader: {type: predicate}
+  grader: {type: predicate, predicate_source: "examples.support_agent.replay_grader:grade_outcome"}
 
 cascade:
   # One sample: the agreement feature is NaN at k=0, and a rehearsal should exercise the feature being present.
@@ -76,6 +79,7 @@ cascade:
   min_turns: 20
 
 onpolicy:
+  tools: live
   k_rollouts: 2
   # Pairs are capped per task now, so a tiny corpus yields tens, not hundreds. Below the real floor of 40 the
   # round would discard before DPO, and the rehearsal would never train the DPO stage it exists to rehearse.

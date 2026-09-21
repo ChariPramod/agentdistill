@@ -65,4 +65,18 @@ eval:
   calib_set: support-calib-v1
   n_per_task: 5
   policy: strict
-  grader: {type: predicate}
+  # Live, because this example's tools are a local, deterministic, per-task-seeded SQLite CRM. Replay would grade
+  # every subject on how closely it reproduces the recorded solver's exact calls: a lookup by email where the
+  # script used the id is counted as a divergence and fails the task, even though the environment answers it
+  # perfectly well. `policy` above applies to replay mode only and is kept for `--tools replay` runs, which is
+  # how the distortion of replay grading gets measured rather than assumed.
+  tools: live
+  # Live mode imports this module and uses its `task_for_trace` to build a fresh CRM from the task's db_seed;
+  # replay mode uses the `grade_outcome` callable. One source, both modes.
+  grader: {type: predicate, predicate_source: "examples.support_agent.replay_grader:grade_outcome"}
+
+onpolicy:
+  # Rollouts against the real CRM too. In replay mode an on-policy trajectory has to be served by fuzzy match --
+  # the student's phrasing drifts from the recording's -- and a fuzzily served success is not a real one. Live
+  # tools remove the trade-off: the student sees the true result of the call it made.
+  tools: live

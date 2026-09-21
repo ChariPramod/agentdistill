@@ -1,8 +1,12 @@
-"""The batched lockstep runner against the sequential harness.
+"""The batched lockstep runner against the sequential harness, and `run_eval` over both.
 
-A batched throughput figure is only a statement about this eval if the batched runner produces the same
-trajectories as the sequential one. These tests hold it to that, per task, on synthetic tasks that exercise every
-stop reason: answered, diverged, malformed arguments, and the turn budget.
+Both production paths drive one `TaskStepper`, so agreeing with each other is a consistency check, not a proof:
+the proof is `tests/test_lockstep_equivalence.py`, which holds the runner to an independent oracle. What this
+file is still for is everything the oracle cannot see -- the grader label, `replay_stats`, the rows and metrics
+`run_eval` writes, and the report's refusal to price an unbatched cost.
+
+The synthetic corpus and the student live in `tests/lockstep_corpus.py`, shared with the oracle tests so both
+files exercise the same trajectories.
 """
 
 from __future__ import annotations
@@ -17,103 +21,20 @@ from hypothesis import strategies as st
 
 from agentdistill.eval.clients import VllmOfflineTurnClient
 from agentdistill.eval.harness import run_task
-from agentdistill.eval.lockstep import LockstepItem, run_lockstep
+from agentdistill.eval.lockstep import REPLY_INDEX, run_lockstep
 from agentdistill.eval.replay import ReplayToolProvider
 from agentdistill.eval.runner import RunSpec, label_grader, lockstep_eligible, run_eval
-from agentdistill.ingest.normalize import normalize_trace
-from tests.conftest import make_call
+from tests.lockstep_corpus import KINDS, TOOL, FakeBatchClient, Sequential, items, make_task, task_index
 
-TOOL = {"type": "function", "function": {"name": "lookup", "parameters": {
-    "type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}}}
-
-
-def make_task(i: int) -> dict:
-    """Task i makes 1 + i % 4 sequential lookups and then answers, so turn counts vary across the batch."""
-    n_calls = 1 + i % 4
-    messages = [{"role": "system", "content": "You look things up."},
-                {"role": "user", "content": f"task {i}: find the value"}]
-    for j in range(n_calls):
-        messages.append({"role": "assistant", "content": None,
-                         "tool_calls": [make_call(f"c{j}", "lookup", {"key": f"k{i}_{j}"})]})
-        messages.append({"role": "tool", "tool_call_id": f"c{j}", "content": json.dumps({"v": f"{i}.{j}"})})
-    messages.append({"role": "assistant", "content": f"The answer to task {i}.", "tool_calls": None})
-    trace = normalize_trace({"id": f"t{i:02d}", "task_id": f"t{i:02d}", "success": True, "tools": [TOOL],
-                             "messages": messages}, source="jsonl")
-    trace["id"] = f"t{i:02d}"
-    trace["cluster"] = i % 3
-    return trace
-
-
-def _task_index(messages: list[dict]) -> int:
-    user = next(m["content"] for m in messages if m["role"] == "user")
-    return int(user.split()[1].rstrip(":"))
-
-
-def respond(messages: list[dict], diverge: set[int] = frozenset(), malformed: set[int] = frozenset(),
-            loop: set[int] = frozenset()) -> dict:
-    """A stateless student: the next turn is a function of the prefix alone, so it gives the same answer under
-    either runner. Some tasks diverge, some send malformed arguments, some never stop calling tools."""
-    i = _task_index(messages)
-    turn = sum(1 for m in messages if m["role"] == "assistant")
-    n_calls = 1 + i % 4
-    if i in loop:
-        return {"role": "assistant", "content": None,
-                "tool_calls": [make_call(f"c{turn}", "lookup", {"key": f"k{i}_0"})]}
-    if turn < n_calls:
-        if i in diverge and turn == 1 % n_calls:
-            return {"role": "assistant", "content": None,
-                    "tool_calls": [make_call(f"c{turn}", "lookup", {"key": "somewhere-unrecorded"})]}
-        if i in malformed and turn == 0:
-            call = make_call("c0", "lookup", {})
-            call["function"]["arguments"] = "{not json"
-            return {"role": "assistant", "content": None, "tool_calls": [call]}
-        return {"role": "assistant", "content": None,
-                "tool_calls": [make_call(f"c{turn}", "lookup", {"key": f"k{i}_{turn}"})],
-                # Transport-only keys must be stripped identically on both paths.
-                "_raw": {"turn": turn}}
-    return {"role": "assistant", "content": f"The answer to task {i}.", "tool_calls": None}
-
-
-class Sequential:
-    """The same student, with no batched method: what the sequential harness sees."""
-
-    def __init__(self, **kinds) -> None:
-        self.kinds = kinds
-
-    def next_turn(self, messages, tools):
-        return respond(messages, **self.kinds)
-
-
-class FakeBatchClient(Sequential):
-    """Batches by answering each request in turn, and records the size of every batch."""
-
-    def __init__(self, shuffle: bool = False, **kinds) -> None:
-        super().__init__(**kinds)
-        self.batch_sizes: list[int] = []
-        self.shuffle = shuffle
-
-    def next_turns_batch(self, requests):
-        self.batch_sizes.append(len(requests))
-        replies = [respond(m, **self.kinds) for m, _ in requests]
-        if self.shuffle and len(replies) > 1:
-            replies = replies[1:] + replies[:1]
-        return replies
-
-
-KINDS = {"diverge": {3, 10, 17, 24, 31, 38}, "malformed": {5, 16, 27}, "loop": {8, 33}}
 FIELDS = ("messages", "n_turns", "n_tool_calls", "diverged", "divergence", "completion_tokens_est", "stop_reason",
           "schema_valid", "final_text", "replay_stats")
-
-
-def _items(traces: list[dict], repeats: int = 1) -> list[LockstepItem]:
-    return [LockstepItem(t, ReplayToolProvider(t), repeat_idx=k) for t in traces for k in range(repeats)]
 
 
 def test_forty_tasks_give_identical_outcomes_under_both_runners():
     traces = [make_task(i) for i in range(40)]
     sequential = [run_task(t, Sequential(**KINDS), ReplayToolProvider(t), max_turns=6) for t in traces]
     client = FakeBatchClient(**KINDS)
-    batched, stats = run_lockstep(_items(traces), client, batch_size=40, max_turns=6)
+    batched, stats = run_lockstep(items(traces), client, batch_size=40, max_turns=6)
 
     assert len(batched) == 40
     for s, b in zip(sequential, batched, strict=True):
@@ -131,33 +52,9 @@ def test_forty_tasks_give_identical_outcomes_under_both_runners():
     assert stats.calls * 5 <= stats.item_turns
 
 
-def test_a_divergence_does_not_touch_its_siblings():
-    traces = [make_task(i) for i in range(12)]
-    clean, _ = run_lockstep(_items(traces), FakeBatchClient(), batch_size=12)
-    one, _ = run_lockstep(_items(traces), FakeBatchClient(diverge={5}), batch_size=12)
-    for a, b in zip(clean, one, strict=True):
-        if a.task_id == "t05":
-            assert b.diverged and b.stop_reason == "diverged"
-            assert not a.diverged
-        else:
-            assert (a.messages, a.stop_reason, a.diverged, a.replay_stats) == \
-                   (b.messages, b.stop_reason, b.diverged, b.replay_stats)
-
-
-def test_batch_size_bounds_the_items_in_flight():
-    traces = [make_task(i) for i in range(5)]
-    client = FakeBatchClient()
-    outcomes, stats = run_lockstep(_items(traces, repeats=3), client, batch_size=4)
-    assert len(outcomes) == 15
-    assert [(o.task_id, o.repeat_idx) for o in outcomes] == [(t["id"], k) for t in traces for k in range(3)]
-    assert stats.max_inflight == 4
-    assert max(client.batch_sizes) == 4
-    assert stats.calls < stats.item_turns
-
-
 def test_a_client_without_a_batched_method_is_driven_per_item_and_not_called_batched():
     traces = [make_task(i) for i in range(6)]
-    outcomes, stats = run_lockstep(_items(traces), Sequential(), batch_size=3)
+    outcomes, stats = run_lockstep(items(traces), Sequential(), batch_size=3)
     assert len(outcomes) == 6
     assert not stats.batched
     assert stats.calls == stats.item_turns
@@ -174,14 +71,14 @@ def test_a_short_or_malformed_batch_is_refused():
 
     traces = [make_task(i) for i in range(3)]
     with pytest.raises(AssertionError, match="2 replies for 3 requests"):
-        run_lockstep(_items(traces), Short(), batch_size=3)
+        run_lockstep(items(traces), Short(), batch_size=3)
     with pytest.raises(AssertionError, match="not an assistant dict"):
-        run_lockstep(_items(traces), NotDicts(), batch_size=3)
+        run_lockstep(items(traces), NotDicts(), batch_size=3)
 
 
 def test_batch_size_must_be_positive():
     with pytest.raises(ValueError, match="at least 1"):
-        run_lockstep(_items([make_task(0)]), FakeBatchClient(), batch_size=0)
+        run_lockstep(items([make_task(0)]), FakeBatchClient(), batch_size=0)
 
 
 # --------------------------------------------------------------------------------------------------------------
@@ -202,7 +99,7 @@ class _FakeLLM:
 
     def generate(self, prompts, sp, lora_request=None):
         self.calls += 1
-        outs = [SimpleNamespace(prompt=p, outputs=[SimpleNamespace(text=f"answer for {_task_index(json.loads(p)['m'])}",
+        outs = [SimpleNamespace(prompt=p, outputs=[SimpleNamespace(text=f"answer for {task_index(json.loads(p)['m'])}",
                                                                    token_ids=[], logprobs=None)])
                 for p in prompts]
         return outs[1:] + outs[:1] if self.shuffle else outs
@@ -222,7 +119,13 @@ def test_vllm_batch_returns_one_turn_per_prompt_in_order_from_one_generate_call(
     turns = client.next_turns_batch(requests)
     assert [t["content"] for t in turns] == [f"answer for {i}" for i in range(5)]
     assert client.llm.calls == 1
-    assert client.next_turn(*requests[2]) == turns[2], "next_turn is a batch of one, so it parses identically"
+    # Each reply names the prompt it answers, which is what the runner checks before it zips.
+    assert [t[REPLY_INDEX] for t in turns] == list(range(5))
+    one = client.next_turn(*requests[2])
+    assert one[REPLY_INDEX] == 0, "a batch of one answers prompt 0 of that batch"
+    assert {k: v for k, v in one.items() if k != REPLY_INDEX} == \
+           {k: v for k, v in turns[2].items() if k != REPLY_INDEX}, \
+           "next_turn is a batch of one, so it parses identically"
 
 
 def test_vllm_batch_detects_outputs_returned_out_of_order():
@@ -232,13 +135,12 @@ def test_vllm_batch_detects_outputs_returned_out_of_order():
         client.next_turns_batch(requests)
 
 
-def test_a_shuffled_batch_changes_trajectories_which_is_why_order_is_checked():
-    """A generic client cannot prove its order to the runner; the damage it would do is what the vLLM check
-    exists to prevent."""
-    traces = [make_task(i) for i in range(4)]
-    good, _ = run_lockstep(_items(traces), FakeBatchClient(), batch_size=4)
-    bad, _ = run_lockstep(_items(traces), FakeBatchClient(shuffle=True), batch_size=4)
-    assert [o.messages for o in good] != [o.messages for o in bad]
+def test_the_vllm_client_labels_every_reply_with_its_prompt_index():
+    """The two order checks are independent. `_in_order` compares each output with the prompt it was generated
+    from; `REPLY_INDEX` is what survives into the runner, which never sees the prompts."""
+    client = _vllm()
+    requests = [([{"role": "user", "content": f"task {i}: x"}], []) for i in range(3)]
+    assert [t[REPLY_INDEX] for t in client.next_turns_batch(requests)] == [0, 1, 2]
 
 
 # --------------------------------------------------------------------------------------------------------------

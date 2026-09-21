@@ -165,7 +165,10 @@ def test_nothing_reads_the_raw_base_model_path():
         for i, line in enumerate(path.read_text().splitlines(), 1):
             if line.lstrip().startswith("#"):
                 continue
-            if ".train.base_model" in line and "resolve_model" not in line and "getattr(cfg" not in line:
+            # `.train.base_model_revision` is a different field and needs no resolving, so it must not match
+            # as a prefix of the model path itself.
+            raw_read = re.search(r"\.train\.base_model(?!_)", line)
+            if raw_read and "resolve_model" not in line and "getattr(cfg" not in line:
                 offenders.append(f"{path.relative_to(ROOT)}:{i}: {line.strip()}")
             # The raw dump carries base_model exactly as written. `cfg.train_config()` resolves it.
             if ".train.model_dump()" in line:

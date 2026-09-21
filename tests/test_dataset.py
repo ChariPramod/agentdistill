@@ -120,3 +120,13 @@ def test_samples_rows_are_written(project_config, registry, tokenizer):
 def test_build_without_a_registry_still_writes(project_config, tokenizer):
     built = build_dataset(_traces(), project_config, name="demo", version=1, tokenizer=tokenizer)
     assert built.artifact.parquet_path.exists()
+
+
+def test_the_manifest_names_the_model_that_wrote_the_corpus():
+    """The report sets it beside the serving teacher; without it, "the student imitates a scripted solver" is a
+    claim nobody can check from the artifact."""
+    from agentdistill.data.dataset import corpus_teacher
+
+    assert corpus_teacher([{"teacher_model": "scripted/rule-based-teacher"}] * 3) == "scripted/rule-based-teacher"
+    assert corpus_teacher([{"teacher_model": "b"}, {"teacher_model": "a"}]) == "mixed: a, b"
+    assert corpus_teacher([{}, {"teacher_model": None}]) is None, "unrecorded reads as unknown, never as a model"

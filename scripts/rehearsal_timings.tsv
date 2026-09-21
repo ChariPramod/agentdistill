@@ -1,0 +1,37 @@
+# Expected stage durations, in seconds, from the CPU rehearsal. `gpu_day.sh` prints each stage's real duration
+# beside its expectation, scaled by `gpu_day.timing_scale` in the config, and flags anything over three times it.
+#
+# Where these came from: the last clean tiny rehearsal (2026-09-20), measured as the gap between consecutive
+# `logs/gpu_day.<stage>.log` mtimes. Two caveats the numbers cannot carry themselves:
+#
+#   - `env` has no predecessor to measure against and `report` finished inside the same second as the stage
+#     before it. Both are recorded as 1s, which is a floor, not a measurement.
+#   - These are a laptop running a two-layer random model over ten tasks. They are the shape of the day, not its
+#     length. `gpu_day.timing_scale` is how the GPU day states its own scale -- set it before the day from the
+#     first stage that completes, rather than reading every stage as 100x late.
+#
+# Regenerate after a rehearsal (the script now records each duration as it goes):
+#
+#   for f in artifacts/gpu_day/*.seconds; do printf '%s\t%s\n' "$(basename "$f" .seconds)" "$(cat "$f")"; done
+#
+# stage	seconds
+env	1
+base_check	3
+sft	8
+merge	14
+eval_base	4
+eval_sft	5
+eval_teach	1
+cmp_sft	1
+onpolicy	192
+eval_r1	7
+unseen	5
+logprobs	28
+calibrate	1
+cascade_ver	3
+quantize	1
+eval_quant	9
+serve_smoke	11
+report	1
+export	2
+eval_teach_replay	1

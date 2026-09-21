@@ -4,11 +4,16 @@ With the harness in place, on-policy training is three functions. This module is
 *training* tasks, many times, grade each rollout, and hand back traces the existing dataset and pair builders
 already understand.
 
-One rule that is easy to get wrong: rollouts must use the **fuzzy** replay policy. An on-policy trajectory drifts
-from the teacher's argument phrasing, and strict mode would stop most rollouts at the first divergence, leaving a
-tiny and badly biased set. The price is that a fuzzily served result is not the result the student's call would
-really have produced, so the fuzzy-hit share is reported on every collection and belongs in any report built on
-these rollouts.
+One rule that is easy to get wrong: rollouts **in replay mode** must use the fuzzy policy. An on-policy
+trajectory drifts from the teacher's argument phrasing, and strict mode would stop most rollouts at the first
+divergence, leaving a tiny and badly biased set. The price is that a fuzzily served result is not the result the
+student's call would really have produced, so the fuzzy-hit share is reported on every collection and belongs in
+any report built on these rollouts.
+
+In live mode that whole trade-off disappears: the student's call is executed, so the result *is* the one it would
+have produced, and the fuzzy share is structurally zero rather than acceptably small. The collection records
+which mode it ran under, so a zero fuzzy share is never mistaken for a replay collection that happened to match
+everything exactly.
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from agentdistill.eval.harness import TaskOutcome, run_task
-from agentdistill.eval.replay import ReplayStats, ReplayToolProvider
+from agentdistill.eval.replay import ReplayStats
 
 
 @dataclass
@@ -30,6 +35,8 @@ class RolloutSet:
     replay: dict = field(default_factory=dict)
     n_tasks: int = 0
     k: int = 0
+    #: `live` or `replay`. Recorded on the round row: the fuzzy-share gate means nothing under `live`.
+    tools_mode: str = "replay"
 
     @property
     def success_rate(self) -> float:
@@ -105,15 +112,29 @@ def collect_rollouts(
     adapter_id: str | None = None,
     round_idx: int = 0,
     progress: Callable[[int, int], None] | None = None,
+    tools: str = "replay",
+    env_source: str | None = None,
 ) -> RolloutSet:
-    """Run the student `k` times on each task and grade every rollout."""
-    out = RolloutSet(n_tasks=len(traces), k=k)
+    """Run the student `k` times on each task and grade every rollout.
+
+    `tools` is `onpolicy.tools`: under `live` each rollout runs against a fresh environment built from the task's
+    seed and is graded on the state it actually produced. The provider and the grader are resolved together by
+    the eval runner's `tool_mode`, so a rollout and an eval run in the same mode are run and graded the same way.
+    """
+    from agentdistill.eval.runner import RunSpec, tool_mode
+
+    provider_for, grader = tool_mode(
+        RunSpec(subject=adapter_id or "rollout", eval_set="", policy=policy,
+                fuzzy_threshold=fuzzy_threshold, tools=tools, env_source=env_source),
+        grader,
+    )
+    out = RolloutSet(n_tasks=len(traces), k=k, tools_mode=tools)
     replay = ReplayStats()
     total = len(traces) * k
     done = 0
     for trace in traces:
         for i in range(k):
-            provider = ReplayToolProvider(trace, policy=policy, fuzzy_threshold=fuzzy_threshold)
+            provider = provider_for(trace)
             if hasattr(client, "reset"):
                 client.reset()
             outcome = run_task(trace, client, provider, repeat_idx=i, max_turns=max_turns)

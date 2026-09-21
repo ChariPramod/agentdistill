@@ -10,7 +10,8 @@ stage() {
   local name="$1"; shift
   if [[ -f "$MARKERS/$name.done" ]]; then echo "== skip $name (done)"; return 0; fi
   echo "== $name  $(date -u +%H:%M:%S)"
-  local status=0
+  local status=0 started
+  started=$(date +%s)
   export AGENTDISTILL_STAGE="$name"
   # The stage runs in its own subshell with errexit on. `"$@" || status=$?` would be shorter and wrong: bash
   # ignores `set -e` inside anything on the left of `||`, so a failing first command in a multi-command stage
@@ -26,6 +27,7 @@ stage() {
   fi
   set -e
   unset AGENTDISTILL_STAGE
+  SECONDS_TAKEN=$(( $(date +%s) - started ))
   if [[ "$status" == "3" ]]; then
     echo "== $name WROTE NOTHING (exit 3): no marker written; fix the cause and rerun to retry this stage" >&2
     exit 3
@@ -34,4 +36,7 @@ stage() {
     exit "$status"
   fi
   touch "$MARKERS/$name.done"
+  # One line per stage, for the timing table at the end of the day. A stage running far over its rehearsal-scaled
+  # expectation is something to look at while it is happening, not afterwards.
+  printf '%s\t%s\n' "$name" "$SECONDS_TAKEN" >> "$MARKERS/stage_seconds.tsv"
 }

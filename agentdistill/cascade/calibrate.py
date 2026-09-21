@@ -301,12 +301,15 @@ def fit_calibrator(
     p_in = shipped.predict_proba(X)[:, 1]
     in_sample = metrics(p_in, y)
 
-    if holdout.get("auroc", 0.0) < MIN_USEFUL_AUROC:
+    holdout_auroc: float = holdout.get("auroc") or 0.0
+    ece_raw = holdout.get("ece")
+    holdout_ece: float = 1.0 if ece_raw is None else float(ece_raw)
+    if holdout_auroc < MIN_USEFUL_AUROC:
         notes.append(
             f"holdout AUROC {holdout.get('auroc'):.3f} is below {MIN_USEFUL_AUROC}: the gate is not separating "
             f"good turns from bad ones. Escalate everything and say so in the report."
         )
-    if holdout.get("ece", 1.0) > MAX_ACCEPTABLE_ECE:
+    if holdout_ece > MAX_ACCEPTABLE_ECE:
         notes.append(
             f"holdout ECE {holdout.get('ece'):.3f} is above {MAX_ACCEPTABLE_ECE}: the probabilities do not mean "
             f"what they say, so a threshold on them does not either."

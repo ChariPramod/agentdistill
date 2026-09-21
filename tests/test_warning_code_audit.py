@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from agentdistill.report.assemble import WARNING_CODES, ReportData
+from agentdistill.report.warnings import CODES
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -26,6 +27,11 @@ def _script_lists() -> tuple[set[str], set[str]]:
         return set(m.group(1).split())
 
     return bash_array("ALLOW"), bash_array("FORBID")
+
+
+def test_the_code_list_has_one_home():
+    """`warnings.CODES` is the list; `assemble.WARNING_CODES` re-exports it so existing imports keep working."""
+    assert WARNING_CODES is CODES
 
 
 def test_every_code_the_report_emits_is_declared():

@@ -113,6 +113,60 @@ def test_round_trips_for_several_argument_shapes(arguments):
     assert masked(tokens, mask) == arguments
 
 
+def test_mask_matches_an_object_the_template_spaced_its_own_way():
+    """Since arguments reach a chat template as an object, the text carries the *template's* serialization.
+
+    Nothing here can know what separators it chose, so nothing here may depend on them. This spacing matches
+    neither the trace's string nor either `json.dumps` spelling.
+    """
+    text = '<tool_call>\n{"name": "f", "arguments": {"a" : 1 ,  "b" : [1, 2]}}\n</tool_call>'
+    spans = arg_char_spans(text, [call("f", '{"a": 1, "b": [1, 2]}')])
+    assert len(spans) == 1
+    a, b = spans[0]
+    assert json.loads(text[a:b]) == {"a": 1, "b": [1, 2]}
+    assert text[a] == "{" and text[b - 1] == "}"
+
+
+def test_mask_matches_an_object_the_template_did_not_escape():
+    """The wire-format string escapes non-ASCII; a template's `tojson` does not. Only a structural match
+    survives that, and this is the case the pinned Qwen template actually produces."""
+    text = 'call {"city": "München"} end'
+    spans = arg_char_spans(text, [call("f", json.dumps({"city": "München"}))])
+    assert [text[a:b] for a, b in spans] == ['{"city": "München"}']
+
+
+def test_mask_matches_an_object_whose_keys_were_reordered():
+    """Two serializations of one object are the same arguments. Matching bytes would say otherwise."""
+    text = 'x {"b": 2, "a": 1} y'
+    assert arg_char_spans(text, [call("f", '{"a": 1, "b": 2}')]) == [(2, 18)]
+
+
+def test_the_argument_object_is_matched_not_the_call_that_wraps_it():
+    """The hermes block is `{"name": ..., "arguments": {...}}`. The outer object is the first one in the text
+    and is not the arguments; masking it would mark the tool name as an argument token."""
+    text = '{"name": "f", "arguments": {"a" : 1}}'
+    a, b = arg_char_spans(text, [call("f", '{"a": 1}')])[0]
+    assert text[a:b] == '{"a" : 1}'
+    assert '"name"' not in text[a:b]
+
+
+def test_a_different_object_in_the_text_is_not_matched():
+    """A structural search must not match an object that merely looks like one."""
+    text = '<tool_call>\n{"name": "f", "arguments": {"order_id": "o_99"}}\n</tool_call>'
+    assert arg_char_spans(text, [call("f", '{"order_id": "o_1"}')]) == []
+
+
+def test_unparseable_arguments_are_never_matched_structurally():
+    """A malformed call must not be quietly paired with a well-formed object in the text: the gate would then
+    score a turn as if the model had produced arguments it did not.
+
+    Verbatim matching still applies (see `test_unparseable_arguments_still_match_verbatim`) -- it is the
+    *structural* step that has nothing to compare and must therefore find nothing.
+    """
+    text = '<tool_call>\n{"name": "f", "arguments": {"a": 1}}\n</tool_call>'
+    assert arg_char_spans(text, [call("f", '{"a": 1, oops}')]) == []
+
+
 def test_arg_char_spans_are_ordered_and_within_the_text():
     text = 'x {"a": 1} y {"b": 2}'
     spans = arg_char_spans(text, [call("f", '{"a": 1}'), call("g", '{"b": 2}')])

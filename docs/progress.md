@@ -284,6 +284,92 @@ they model the templates that exist rather than the one shape that hid this.
 downloads a tokenizer. The rehearsal path is unchanged: `project.tiny.yaml` keeps the locally generated tiny model
 and the replay teacher, and the whole clean rehearsal still runs offline.
 
+### A batched reply now names the prompt it answers (phase 3f §4, WP2)
+
+The phase 3e entry above says "a generic batched client cannot prove its order to the runner; the runner checks
+count and shape, and the order check lives in the vLLM client". That is no longer true, and it was the weaker
+arrangement: the runner zips replies against live items, so an out-of-order batch hands one task another task's
+turn and every trajectory after that point is fiction — a failure with no symptom, in the one place the numbers
+come from.
+
+Every reply from `next_turns_batch` now carries `lockstep.REPLY_INDEX` (`"_index"`), the index of the prompt it
+answers. `check_replies` refuses a reply whose index is not its position, naming both, and refuses an unindexed
+batch outright rather than guessing. The key is underscore-prefixed, so `TaskStepper.step` strips it with the
+other transport keys and it never reaches a trajectory. The vLLM client keeps its own `_in_order` check — it
+compares each output against the prompt it was generated from, evidence that exists nowhere else — and fills the
+index in from request order afterwards. The two checks are independent on purpose.
+
+No recorded number moves: the only production batched client is `VllmOfflineTurnClient`, which already asserted
+its order. What changes is that a client which *cannot* prove its order now fails loudly instead of quietly.
+
+Three smaller things from the same review:
+
+- **The oracle's divergence payload follows the harness, not the handbook.** `tests/oracle/reference_harness.py`
+  is Appendix A verbatim (imports aside) except for `DIVERGED`, which the appendix gives as
+  `{"error": "replay divergence"}`. The harness writes `{"error": "replay divergence: this call was not
+  recorded"}`, and the production string is the contract. `BAD_JSON` already matched.
+- **`run_lockstep` takes an injectable `clock`.** Default `time.perf_counter`; nothing in production passes it.
+  It exists so a test can make replay lookups expensive and show `generate_seconds` does not move — the figure
+  is the denominator of the batched throughput number, and "time spent generating" has to mean that and only
+  that. The timing was already correct; it was untestable.
+- **The lockstep test corpus lives in `tests/lockstep_corpus.py`.** `docs/ownership.md` gives WP2
+  `tests/test_lockstep*.py` and `tests/oracle/`, which does not cover a shared, non-collected helper. The
+  synthetic tasks and the stateless student are shared by the oracle tests and the `run_eval` tests, and
+  duplicating them would let the two drift. The lead should widen WP2's glob to include it.
+
+### Decision A: the corpus is not re-recorded with Opus this round (owner, phase 3f §1.2)
+
+The training corpus stays the scripted solver's. This round ships the operational claim -- a student with an Opus
+fallback, compared with all-Opus, at this cost and this success rate -- and the report says plainly that the
+student imitates a scripted solver: the dataset manifest records `corpus_teacher`, the lineage prints it beside
+the serving teacher, and `corpus_teacher_differs` is a standing, allowed disclosure. Re-recording with Opus is real
+distillation but costs teacher spend, a new corpus and a terms review; it goes to the top of the next phase.
+
+### Decision B: retraining does not ingest teacher-written turns (owner, phase 3f §1.2)
+
+`ingest.exclude_teacher_turns` stays `true` until Anthropic's commercial terms on using model outputs to train
+other models have been read and a decision recorded here. Excluding them is safe whichever way that decision goes,
+and reversible with one config key. The rule is the simple one: a gateway request is excluded entirely if any of
+its assistant turns came from the teacher arm, and the count excluded is logged and recorded on the ingest row.
+
+### Three work packages were cut off mid-edit; the lead finished them (phase 3f)
+
+WP1, WP3 and WP4 hit a session limit partway through and never reported; WP2 finished. What had landed was
+integrated and the gaps closed by the lead, so some of this phase's code was not written by the package that owns
+it. What was missing, and is now in: migration 008 was never registered; three retirement tests used a cutoff
+equal to the rows' own timestamps (`--built-before` is exclusive, as its name says -- the tests were wrong, not the
+code); `corpus_teacher` was never written to the manifest; the CLI registrations; `bootstrap_box.sh`; the export
+stage, exit trap and timing table in `gpu_day.sh`; live tools in tiny mode; and the tests for live mode, the
+pre-flight, the lock and the export. WP1 recorded `tools_mode` twice -- on the round result and inside the pair
+statistics, which broke a test that pins those statistics -- so it now has one home, and rides in the round row's
+stats JSON only at persistence time.
+
+### The report pairs subjects in the configured tool mode (phase 3f WP1)
+
+The GPU day evaluates the teacher twice on purpose, live and replay, to measure replay's distortion. "The latest
+teacher run" is then the replay one, and the first live rehearsal paired it with a live student: `compare`
+correctly refused, and the report carried `eval_mode_mismatch`, which the gate forbids. `assemble` now selects
+every subject in `eval.tools`; the other mode's runs feed only the evaluation-mode section.
+
+### Retirement uses the time the fix entered the tree, not the commit that recorded it (phase 3f WP3)
+
+The render-boundary fix was applied, the real dataset rebuilt with it at 07:04Z, and the fix committed as 87e8653
+at 07:12Z. `--built-before 87e8653` would have retired that valid dataset and left `dataset latest` empty for the
+GPU day. The local registry was retired with `--built-before 2026-09-20T07:00:00Z`, which retires only the
+fixture-tokenizer dataset `ds_99a6c87b9a49b745`.
+
+### The export's registry was a macOS resource fork (phase 3f WP4)
+
+The first export failed verification: the verifier opened `._registry.tiny.db`, a 163-byte AppleDouble header
+macOS `tar` adds beside every file and hides from its own listing, because it too ends in `.db`. The export now sets
+`COPYFILE_DISABLE=1` and the verifier skips `._` members. Linux boxes never produce these, which is why only the
+laptop rehearsal could find it.
+
+### mypy had gone red during phases 3d-3f
+
+CI runs `mypy agentdistill`; it passed at the start of phase 3d and had 21 errors by phase 3f, none caught because
+no phase ran it. All were narrowing and annotation gaps, not behaviour; it is clean again.
+
 ## Blocked on hardware or credentials
 
 | Item | Blocker |

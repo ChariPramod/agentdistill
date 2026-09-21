@@ -27,10 +27,15 @@ class RoundCfg:
     k_rollouts: int = 8
     rft_cap_per_task: int = 2
     #: Rollouts need fuzzy replay: an on-policy trajectory drifts from the teacher's argument phrasing, and
-    #: strict mode would stop most rollouts at the first turn.
+    #: strict mode would stop most rollouts at the first turn. Ignored under `tools: live`, where nothing is
+    #: replayed at all.
     replay_policy: str = "fuzzy"
     #: Above this, too many results were served by approximate match for the successes to mean anything.
     max_fuzzy_share: float = 0.5
+    #: `onpolicy.tools`. Under `live` the rollouts run against the project's real tools, the fuzzy-share gate has
+    #: nothing to guard, and the round row says which mode applied so a zero share is never read as a clean
+    #: replay collection.
+    tools: str = "replay"
     min_pairs: int = 40
     #: Promote on equal success if cost improved, within this tolerance.
     success_tolerance_pp: float = 1.0
@@ -48,6 +53,9 @@ class RoundResult:
     reason: str = ""
     n_rollouts: int = 0
     fuzzy_share: float = 0.0
+    #: The tool mode the rollouts ran under. Also written into `pair_kinds`, which is the round row's one JSON
+    #: column, so the mode survives on the row rather than only in memory.
+    tools_mode: str = "replay"
     n_rft: int = 0
     n_pairs: int = 0
     pair_kinds: dict = field(default_factory=dict)
@@ -139,15 +147,24 @@ def run_round(
     cfg: RoundCfg,
 ) -> RoundResult:
     """One round. Always recorded, including when it fails."""
-    r = RoundResult(round_idx=round_idx, start_adapter=adapter, ids={"round_id": f"rd_{uuid.uuid4().hex[:16]}"})
+    r = RoundResult(round_idx=round_idx, start_adapter=adapter, ids={"round_id": f"rd_{uuid.uuid4().hex[:16]}"},
+                    tools_mode=cfg.tools)
+    # Set before anything can fail, so a round that discards at the first gate still records which environment it
+    # ran in. `pair_kinds` is the row's JSON column; the pair builder's own keys are merged into it below.
+    r.tools_mode = cfg.tools
     try:
         roll = st.collect_rollouts(adapter, train_task_ids, cfg.k_rollouts, cfg.replay_policy)
         rollouts = roll["rollouts"]
         r.n_rollouts = len(rollouts)
         r.fuzzy_share = float(roll.get("fuzzy_share", 0.0))
+        # The collector is the authority on what it actually did; the config says what was asked for. They differ
+        # only when the wiring is wrong, and the row should carry what happened.
+        r.tools_mode = str(roll.get("tools_mode") or cfg.tools)
         r.ids["rollout_eval_run"] = roll.get("eval_run_id")
 
-        if r.fuzzy_share > cfg.max_fuzzy_share:
+        # Only in replay mode. Under live tools nothing is served by approximate match, so the share is zero by
+        # construction and a gate on it would be a check that can never fire dressed up as a safeguard.
+        if r.tools_mode == "replay" and r.fuzzy_share > cfg.max_fuzzy_share:
             r.decision, r.reason = "discard", (
                 f"fuzzy replay share {r.fuzzy_share:.0%} is above {cfg.max_fuzzy_share:.0%}; too many tool "
                 f"results were served by approximate match for these successes to mean anything"
@@ -155,7 +172,8 @@ def run_round(
             return r
 
         rft_id, r.n_rft = st.build_rft(rollouts, cfg.rft_cap_per_task)
-        pairs_id, r.n_pairs, r.pair_kinds = st.build_pairs(rollouts, teacher_by_task)
+        pairs_id, r.n_pairs, pair_kinds = st.build_pairs(rollouts, teacher_by_task)
+        r.pair_kinds = {**r.pair_kinds, **(pair_kinds or {})}
         r.ids.update(rft_dataset=rft_id, dpo_dataset=pairs_id)
 
         if r.n_pairs < cfg.min_pairs:
@@ -216,14 +234,16 @@ def run_rounds(
 def plan(adapter: str, rounds: int, train_task_ids: list[str], cfg: RoundCfg) -> list[str]:
     """What `--dry-run` prints: the stages and their sizes, with nothing executed."""
     n = len(train_task_ids)
+    tools = f"{cfg.replay_policy} replay" if cfg.tools == "replay" else "live tools"
     return [
         f"start adapter      {adapter}",
         f"rounds             {rounds}",
         f"training tasks     {n}",
-        f"rollouts           {n} x {cfg.k_rollouts} = {n * cfg.k_rollouts} per round ({cfg.replay_policy} replay)",
+        f"rollouts           {n} x {cfg.k_rollouts} = {n * cfg.k_rollouts} per round ({tools})",
         f"RFT cap            {cfg.rft_cap_per_task} per task",
         f"minimum pairs      {cfg.min_pairs} (teacher pairs capped at {cfg.max_teacher_ratio:g}x rollout pairs)",
-        f"abort if           fuzzy share > {cfg.max_fuzzy_share:.0%}",
+        f"abort if           fuzzy share > {cfg.max_fuzzy_share:.0%}"
+        + ("" if cfg.tools == "replay" else " (not checked under live tools: nothing is replayed)"),
         f"promote if         success CI excludes zero, or within {cfg.success_tolerance_pp} pp with fewer tokens",
         f"hard floors        schema validity >= {cfg.schema_floor}, "
         f"divergence not worse by more than {cfg.divergence_slack_pp} pp",

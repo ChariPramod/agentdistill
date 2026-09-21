@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  schedule:
+    # Nightly, for the rehearsal job below: it is the only job that runs every stage in sequence, and the
+    # failures it finds are the ones that otherwise surface on a rented GPU.
+    - cron: "17 6 * * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -81,15 +85,17 @@ jobs:
       - run: uv pip install --system -e ".[dev,tokenizers]"
 
       - name: Record, split, ingest, curate
+        # `--base-model` overrides the config's pinned Hub model with the in-repo fixture tokenizer: this job runs
+        # offline by design, and the point here is that the pipeline runs and is deterministic, not which
+        # tokenizer it used. The GPU day's dataset is built with the pinned model, and `train sft` refuses a
+        # dataset tokenized by anything else.
         run: |
-          python -m examples.support_agent.record --scripted --error-rate 0.25 --n 260 --seed 7 \
-            --out examples/support_agent/traces.jsonl
-          python examples/support_agent/split_corpus.py
+          bash scripts/make_corpus.sh
           cd examples/support_agent
           agentdistill ingest jsonl traces-train.jsonl --config project.yaml
           agentdistill evalset add support-holdout-v1 eval-holdout.jsonl --config project.yaml
           agentdistill evalset add support-unseen-v1 eval-unseen.jsonl --config project.yaml
-          agentdistill curate --config project.yaml
+          agentdistill curate --config project.yaml --base-model ../../tests/fixtures/tokenizer
 
       - name: The harness reproduces the recording exactly
         working-directory: examples/support_agent
@@ -106,7 +112,7 @@ jobs:
       - name: Curation is deterministic
         working-directory: examples/support_agent
         run: |
-          agentdistill curate --config project.yaml | tee second-run.txt
+          agentdistill curate --config project.yaml --base-model ../../tests/fixtures/tokenizer | tee second-run.txt
           grep -q "identical to" second-run.txt || {
             echo "::error::re-running curate produced a different dataset; curation is not deterministic"
             exit 1
@@ -122,3 +128,34 @@ jobs:
         with:
           name: curation-report
           path: examples/support_agent/reports/
+
+  rehearsal:
+    name: clean rehearsal (tiny mode, fresh checkout)
+    # Nightly and on demand only: it runs every GPU-day stage end to end and takes tens of minutes.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      # The rehearsal trains, so it needs the training extras the smoke job uses. bitsandbytes stays out: CUDA
+      # only, and tiny mode runs unquantized on CPU.
+      - run: uv pip install --system -e ".[dev,tokenizers]" "torch>=2.3" "trl>=0.12" "peft>=0.12" "accelerate>=0.33"
+
+      - name: Clean rehearsal from this checkout
+        # No CLEAN_ALLOW_DIRTY: a checkout is clean, and a dirty-tree warning here means something wrote into the
+        # tree during the run.
+        run: bash scripts/clean_rehearsal.sh
+
+      - name: Upload the report and the stage logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rehearsal-report
+          path: |
+            artifacts/gpu_day/report.json
+            artifacts/gpu_day/report.html
+            logs/

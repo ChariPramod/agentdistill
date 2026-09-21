@@ -227,6 +227,10 @@ class OnPolicyConfig(StrictModel):
     max_fuzzy_share: float = Field(0.5, ge=0.0, le=1.0)
     #: Preference pairs per task, at most. Sampled, not enumerated: k rollouts per task is k^2/4 candidate pairs.
     pair_cap_per_task: int = Field(3, ge=1)
+    #: `live` runs rollouts against the project's real tools; `replay` serves recorded results. Live is right
+    #: wherever the tools are a local, deterministic sandbox: the student then sees the true result of the call it
+    #: made rather than the nearest recorded one, and the fuzzy-share gate stops mattering.
+    tools: Literal["live", "replay"] = "replay"
 
 
 class GraderConfig(StrictModel):
@@ -262,6 +266,10 @@ class EvalConfig(StrictModel):
     #: The calibration eval set: disjoint from training and from `eval_set`, used only to fit the confidence gate.
     #: The retrain loop evaluates the candidate on it with logprobs and calibrates from that run.
     calib_set: str | None = None
+    #: `live` grades against the project's real tools and their final state; `replay` serves recorded results and
+    #: counts any departure from the recording as a divergence. Replay measures how closely a subject imitates the
+    #: recorded solver, which is not the same question as whether it solved the task.
+    tools: Literal["live", "replay"] = "replay"
     #: Declare that the teacher is not evaluated this run. The only way `eval run teacher` may write no row and
     #: still pass; the report prints it as a skip, distinct from a teacher run that is simply missing.
     skip_teacher: bool = False
@@ -333,6 +341,18 @@ class ServeConfig(StrictModel):
     port: int = 8710
 
 
+class IngestConfig(StrictModel):
+    #: Turns written by the teacher arm are the teacher's output, not the student's traffic. Excluded by default
+    #: until the provider's terms on training from model outputs have been read and a decision recorded.
+    exclude_teacher_turns: bool = True
+
+
+class GpuDayConfig(StrictModel):
+    #: Rehearsal durations times this is what the GPU day expects per stage. A stage over three times its
+    #: expectation is flagged while it is running, not afterwards.
+    timing_scale: float = Field(1.0, gt=0.0)
+
+
 class ProjectConfig(StrictModel):
     """The whole project. Loaded once per CLI invocation and threaded through every stage."""
 
@@ -341,6 +361,8 @@ class ProjectConfig(StrictModel):
     artifacts: str = "./artifacts"
     reports: str = "./reports"
     sources: list[Source] = Field(default_factory=list)
+    ingest: IngestConfig = Field(default_factory=IngestConfig)
+    gpu_day: GpuDayConfig = Field(default_factory=GpuDayConfig)
     teacher: TeacherConfig | None = None
     curate: CurateConfig = Field(default_factory=CurateConfig)
     dataset: DatasetConfig = Field(default_factory=DatasetConfig)

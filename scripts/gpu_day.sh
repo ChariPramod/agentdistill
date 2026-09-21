@@ -72,6 +72,36 @@ cap() { if [[ "$DRY" == "1" ]]; then echo "<$1>"; else shift; agentdistill "$@";
 # shellcheck source=scripts/stage_lib.sh
 source "$(dirname "$0")/stage_lib.sh"
 
+s_export() { bash scripts/export_results.sh; }
+
+# The export also runs when a stage fails, exits 3, or the session is interrupted: a day that died at `calibrate`
+# still produced eleven stages of rows and logs, and the box is about to be deleted. Guarded so the normal path
+# does not export twice.
+on_exit() {
+  local status=$?
+  # The export stage writes its marker on success, so the trap only fires when the day ended some other way:
+  # a stage failed, a stage wrote no row and exited 3, or someone interrupted it.
+  if [[ "$DRY" == "1" || -f "$MARKERS/export.done" ]]; then exit "$status"; fi
+  echo "== export (from the exit trap, status $status)"
+  bash scripts/export_results.sh || echo "export failed; the registry is still under .agentdistill/" >&2
+  exit "$status"
+}
+trap on_exit EXIT
+
+timing_table() {
+  local file="$MARKERS/stage_seconds.tsv"
+  [[ -f "$file" ]] || return 0
+  local scale
+  scale="$(cap timing_scale config get gpu_day.timing_scale "${CONFIG_ARG[@]}" 2>/dev/null || echo 1)"
+  echo "== stage timings (expected = rehearsal x ${scale})"
+  awk -v scale="$scale" -v timings="scripts/rehearsal_timings.tsv" '
+    BEGIN { while ((getline line < timings) > 0) { if (line !~ /^#/ && line != "") { split(line, f, "\t"); expected[f[1]] = f[2] } } }
+    { want = (expected[$1] == "" ? 0 : expected[$1] * scale)
+      flag = (want > 0 && $2 > 3 * want) ? "  <- OVER 3x EXPECTED" : ""
+      printf "  %-18s %6ss   expected %6ss%s\n", $1, $2, (want > 0 ? sprintf("%.0f", want) : "?"), flag }
+  ' "$file"
+}
+
 BASE_MODEL="$(cap base_model config get train.base_model "${CONFIG_ARG[@]}")"
 QUANT="$(cap quantization config get serve.quantization "${CONFIG_ARG[@]}")"
 
@@ -131,7 +161,11 @@ s_merge()       { ad adapter merge "$(cap adapter adapter latest --tag "$TAG" "$
 
 s_eval_base()   { ad eval run base --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --batch "$BATCH" --tag "$TAG" "${CONFIG_ARG[@]}"; }
 s_eval_sft()    { ad eval run "$(cap adapter adapter latest --tag "$TAG" "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --backend "$BACKEND" --batch "$BATCH" --tag "$TAG" "${CONFIG_ARG[@]}"; }
-s_eval_teach()  { ad eval run "$TEACHER_SUBJECT" --eval-set "$EVAL_SET" --n "$N_EVAL" --policy strict --tag "$TAG" "${CONFIG_ARG[@]}"; }
+s_eval_teach()  { ad eval run "$TEACHER_SUBJECT" --eval-set "$EVAL_SET" --n "$N_EVAL" --tools live --tag "$TAG" "${CONFIG_ARG[@]}"; }
+# The same teacher, the same tasks, graded by replay. Not a second baseline: the gap between this and the live
+# run above is the measured distortion of replay grading, which the report prints as its own section. Without it
+# the report would have to claim replay's penalty is small rather than show it.
+s_eval_teach_replay() { ad eval run "$TEACHER_SUBJECT" --eval-set "$EVAL_SET" --n "$N_EVAL" --tools replay --policy strict --tag "$TAG-replay" "${CONFIG_ARG[@]}"; }
 # Both sides by subject. `eval latest --tag` returned whichever tagged run was newest -- the teacher's, once the
 # teacher row existed -- and the stage compared the teacher against base under the name cmp_sft.
 s_cmp_sft()     { ad eval compare "$(cap ev eval latest --subject "$(cap adapter adapter latest --tag "$TAG" "${CONFIG_ARG[@]}")" --eval-set "$EVAL_SET" "${CONFIG_ARG[@]}")" "$(cap ev eval latest --subject base --eval-set "$EVAL_SET" "${CONFIG_ARG[@]}")" --out "$MARKERS/cmp_sft.md" "${CONFIG_ARG[@]}"; }
@@ -182,6 +216,7 @@ stage merge        s_merge
 stage eval_base    s_eval_base
 stage eval_sft     s_eval_sft
 stage eval_teach   s_eval_teach
+stage eval_teach_replay s_eval_teach_replay
 stage cmp_sft      s_cmp_sft
 stage onpolicy     s_onpolicy
 stage eval_r1      s_eval_r1
@@ -194,5 +229,8 @@ stage eval_quant   s_eval_quant
 stage serve_smoke  s_serve_smoke
 stage report       s_report
 
+stage export       s_export
+
 echo "== done  $(date -u +%H:%M:%S)"
+timing_table
 ls -la "$MARKERS"

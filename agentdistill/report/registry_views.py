@@ -2,6 +2,11 @@
 
 Kept out of `Registry` because they are report-shaped rather than storage-shaped: a per-cluster table joining
 three eval runs, an adapter's provenance chain, and the exact commands that produced a tag's rows.
+
+The selectors here skip retired rows for the same reason `registry/select.py` does: a row retired for being
+built before a fix is invalid, not merely old, and a report that puts an invalid artifact's number on the page
+is the failure mode the retirement exists to prevent. The lookups that take an explicit id -- `lineage`,
+`calibration_for` -- still answer for a retired row on purpose: "why was this retired" has to be answerable.
 """
 
 from __future__ import annotations
@@ -11,6 +16,7 @@ from typing import Any
 from sqlalchemy import text
 
 from agentdistill.registry.base import loads
+from agentdistill.registry.retire import is_retired
 
 
 def per_cluster_table(
@@ -166,17 +172,24 @@ def latest_round(registry: Any, tag: str | None = None) -> dict | None:
 
 
 def latest_quantized(registry: Any, parent_adapter_id: str) -> dict | None:
-    """The quantized artifact derived from an adapter, if one was registered."""
+    """The newest non-retired quantized artifact derived from an adapter, if one was registered.
+
+    Rows are walked newest-first rather than taking one with `LIMIT 1`, because the newest may be retired and
+    an older valid one is still the artifact the report should show.
+    """
     with registry.engine.connect() as conn:
-        row = conn.execute(
+        rows = conn.execute(
             text(
                 """SELECT * FROM adapters
                    WHERE parent_adapter_id = :p AND quantization IS NOT NULL
-                   ORDER BY created_at DESC LIMIT 1"""
+                   ORDER BY created_at DESC"""
             ),
             {"p": parent_adapter_id},
-        ).mappings().first()
-    return dict(row) if row else None
+        ).mappings().fetchall()
+    for row in rows:
+        if not is_retired(row):
+            return dict(row)
+    return None
 
 
 def pricing(registry: Any, provider: str, model: str) -> dict | None:

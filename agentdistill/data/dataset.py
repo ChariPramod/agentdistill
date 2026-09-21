@@ -37,6 +37,20 @@ class BuildResult:
         return self.artifact.n_samples
 
 
+def corpus_teacher(traces: list[dict]) -> str | None:
+    """Which model wrote the training corpus, from the traces' own `teacher_model` field.
+
+    Recorded on the manifest -- not in the content hash, which the traces already determine -- so the report can
+    set it beside the serving teacher. When they differ, the student imitates the corpus teacher and a comparison
+    with the serving teacher is operational, not distillation. Several writers are named, not collapsed to one:
+    a mixed corpus is a fact the reader should see.
+    """
+    names = sorted({str(t.get("teacher_model")) for t in traces if t.get("teacher_model")})
+    if not names:
+        return None
+    return names[0] if len(names) == 1 else "mixed: " + ", ".join(names)
+
+
 def base_revision(cfg: Any, model: str | None) -> dict:
     """`{"revision": ...}` when `model` is the configured base model and a revision is pinned, else `{}`.
 
@@ -166,7 +180,8 @@ def build_dataset(
         max_seq_len=max_seq_len,
         filter_config=filters,
         target=target,
-        extra={"n_traces_in": len(traces), "n_traces_used": used, "window_turns": cfg.dataset.window_turns},
+        extra={"n_traces_in": len(traces), "n_traces_used": used, "window_turns": cfg.dataset.window_turns,
+               "corpus_teacher": corpus_teacher(traces)},
     )
 
     dataset_id = f"ds_{artifact.content_hash[:16]}"

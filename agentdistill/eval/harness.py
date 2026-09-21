@@ -1,7 +1,13 @@
 """The task runner.
 
 Runs one task: start from the recorded system and user messages, let the client produce turns, serve tool results
-from the recording, stop when it answers, diverges, or runs out of turns.
+from the provider, stop when it answers, diverges, or runs out of turns.
+
+Two providers satisfy the same interface. `ReplayToolProvider` serves the results the recording holds and raises
+`Divergence` for anything else; `LiveToolProvider` executes the call against the project's real (local,
+deterministic) tools and never diverges. The stepper does not care which it is holding, which is the point: the
+per-turn rules must be identical under both, or a live number and a replay number would not be about the same
+harness.
 
 Divergence stops the trajectory. The task is then graded as it stands -- usually a failure, since the work was not
 finished -- but divergence is reported as its own metric, because "the student went somewhere the recording
@@ -13,9 +19,10 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 from agentdistill.curate.schema import tool_calls_valid
-from agentdistill.eval.replay import Divergence, ReplayToolProvider
+from agentdistill.eval.replay import Divergence
 from agentdistill.eval.teacher_forced import TurnClient
 
 
@@ -47,6 +54,9 @@ class TaskOutcome:
     success: bool | None = None
     grader_detail: str = ""
     grader_out: dict = field(default_factory=dict)
+    #: The provider the trajectory ran against, so a live grader can read the final state it produced rather than
+    #: rebuilding one from the calls. Never stored: `to_row` leaves it out and the registry writes only the row.
+    provider: Any = None
 
     def to_row(self) -> dict:
         return {
@@ -89,7 +99,7 @@ class TaskStepper:
     runner produces the same trajectories as the sequential one.
     """
 
-    def __init__(self, trace: dict, provider: ReplayToolProvider, repeat_idx: int = 0, max_turns: int = 12) -> None:
+    def __init__(self, trace: dict, provider: Any, repeat_idx: int = 0, max_turns: int = 12) -> None:
         self.trace, self.provider = trace, provider
         self.repeat_idx, self.max_turns = repeat_idx, max_turns
         self.tools = trace.get("tools") or []
@@ -178,17 +188,18 @@ class TaskStepper:
             stop_reason=self.stop_reason,
             escalations=int(gate.get("escalations", 0)),
             wasted_student_tokens=int(gate.get("wasted_student_tokens", 0)),
+            provider=self.provider,
         )
 
 
 def run_task(
     trace: dict,
     client: TurnClient,
-    provider: ReplayToolProvider,
+    provider: Any,
     repeat_idx: int = 0,
     max_turns: int = 12,
 ) -> TaskOutcome:
-    """Run one task against the replayed environment."""
+    """Run one task against the provider's environment, replayed or live."""
     stepper = TaskStepper(trace, provider, repeat_idx=repeat_idx, max_turns=max_turns)
     while not stepper.done:
         stepper.step(client.next_turn(*stepper.request))

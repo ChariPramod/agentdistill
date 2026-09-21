@@ -62,8 +62,9 @@ def scenario_of(row: dict) -> dict:
     still deterministic -- it only loses the property that the rank is readable as "scenario, instance".
     """
     tid = row_task_id(row)
-    task_input = row.get("task_input") if isinstance(row.get("task_input"), dict) else {}
-    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    raw_input, raw_meta = row.get("task_input"), row.get("metadata")
+    task_input: dict = raw_input if isinstance(raw_input, dict) else {}
+    metadata: dict = raw_meta if isinstance(raw_meta, dict) else {}
     scenario = task_input.get("scenario") or metadata.get("scenario") or tid
     instance = metadata.get("db_seed")
     if instance is None:

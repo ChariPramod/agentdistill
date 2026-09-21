@@ -28,8 +28,8 @@ UNASSIGNED = -1
 class ClusterAssigner:
     """Nearest-centroid assignment in the embedding space curation clustered in."""
 
-    def __init__(self, centroids: np.ndarray, embedder: Any, model_id: str | None = None) -> None:
-        self.c = centroids
+    def __init__(self, centroids: np.ndarray | None, embedder: Any, model_id: str | None = None) -> None:
+        self.c: np.ndarray | None = centroids
         self.embed = embedder
         self.model_id = model_id
 

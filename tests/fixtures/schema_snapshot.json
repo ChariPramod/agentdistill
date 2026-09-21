@@ -141,6 +141,20 @@
       "notnull": 0,
       "pk": 0,
       "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "retired_at",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "retired_reason",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
     }
   ],
   "calibrations": [
@@ -411,6 +425,20 @@
       "default": null,
       "name": "created_at",
       "notnull": 1,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "retired_at",
+      "notnull": 0,
+      "pk": 0,
+      "type": "TEXT"
+    },
+    {
+      "default": null,
+      "name": "retired_reason",
+      "notnull": 0,
       "pk": 0,
       "type": "TEXT"
     }

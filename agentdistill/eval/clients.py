@@ -19,6 +19,7 @@ import json
 from typing import Any
 
 from agentdistill.data.template_check import parse_fallback, parse_with_vllm
+from agentdistill.eval.lockstep import REPLY_INDEX
 
 
 class ParseError(ValueError):
@@ -110,12 +111,17 @@ class HfTurnClient:
         self.logprobs, self.n_samples, self.top_logprobs = logprobs, n_samples, top_logprobs
         self.seed = seed
 
+    def _render(self, messages: list[dict], tools: list[dict]) -> str:
+        """The prompt this client generates from. Named, like the vLLM client's, so the render boundary is one
+        callable per client and a test can exercise it without a model on the machine."""
+        from agentdistill.data.template_check import render
+
+        return render(self.tok, messages, tools or None, add_generation_prompt=True)
+
     def next_turn(self, messages: list[dict], tools: list[dict]) -> dict:
         import torch
 
-        from agentdistill.data.template_check import render
-
-        prompt = render(self.tok, messages, tools or None, add_generation_prompt=True)
+        prompt = self._render(messages, tools)
         enc = self.tok(prompt, return_tensors="pt", add_special_tokens=False).to(self.model.device)
         kwargs: dict[str, Any] = {
             "max_new_tokens": self.max_new_tokens,
@@ -260,16 +266,20 @@ class VllmOfflineTurnClient:
         for the whole batch and renders with vLLM's copy of the template, and either would make a batched turn
         differ from a sequential one.
 
-        The lockstep runner zips these replies against its live tasks, so the order is checked here, against the
-        prompt each output carries, rather than trusted.
+        The lockstep runner zips these replies against its live tasks, so order is proved rather than trusted,
+        twice over: `_in_order` checks each output against the prompt it was generated from -- the only place
+        that evidence exists -- and every reply then carries `REPLY_INDEX`, the index of the prompt it answers,
+        which the runner checks before it zips. A reply that cannot name its prompt is refused there.
         """
         texts = [self._render(m, t) for m, t in prompts]
         outs = _in_order(self.llm.generate(texts, self.sp, lora_request=self.lora), texts)
         turns = []
-        for out in outs:
+        for i, out in enumerate(outs):
             turn = parse_assistant(out.outputs[0].text, self.tok, self.parser_name, self.family)
             if self.logprobs:
                 turn["logprobs"] = {"content": _vllm_token_logprobs(out.outputs[0])}
+            # Underscore-prefixed, so the stepper strips it before the turn joins a trajectory.
+            turn[REPLY_INDEX] = i
             turns.append(turn)
         if self.sample_sp is not None:
             extra = _in_order(self.llm.generate(texts, self.sample_sp, lora_request=self.lora), texts)

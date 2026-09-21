@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from agentdistill.eval.harness import TaskOutcome, run_task
+from agentdistill.eval.live import LiveStats
 from agentdistill.eval.lockstep import LockstepItem, LockstepStats, run_lockstep, supports_batching
 from agentdistill.eval.replay import ReplayStats, ReplayToolProvider
 from agentdistill.eval.stats import (
@@ -40,6 +41,13 @@ class RunSpec:
     fuzzy_threshold: float = 0.92
     #: Groups the runs of one session so `eval latest --tag` can find them.
     tag: str | None = None
+    #: `live` runs the project's real tools and grades the final state; `replay` serves recorded results and
+    #: counts any other call as a divergence. Recorded on the run as `eval_mode`, because the two modes answer
+    #: different questions and a comparison across them is refused.
+    tools: str = "replay"
+    #: Where live mode finds the project's environment: `eval.grader.predicate_source`, or a name registered with
+    #: `agentdistill.eval.live.register_env_factory`. Ignored in replay mode.
+    env_source: str | None = None
 
 
 def label_grader(trace: dict, outcome: TaskOutcome) -> tuple[bool, dict]:
@@ -69,7 +77,12 @@ def run_eval(
     lockstep runner with at most that many in flight -- but only when the client can batch and carries no
     per-task state; otherwise the run falls back to the sequential path, and its throughput is labelled
     unbatched either way.
+
+    `spec.tools` picks the environment. In live mode the grader is replaced by one that reads the provider's
+    final state, because grading a live run by reconstructing state from the calls would throw away the whole
+    point of having run them.
     """
+    provider_for, grader = tool_mode(spec, grader)
     run_id = f"ev_{uuid.uuid4().hex[:16]}"
     registry.start_eval_run(run_id, eval_set["id"], spec.subject, spec.n_per_task, tag=spec.tag)
 
@@ -93,10 +106,7 @@ def run_eval(
     if batch_size is not None and lockstep_eligible(client):
         items = [
             # A fresh provider per repeat, exactly as on the sequential path.
-            LockstepItem(traces_by_task[trace_id],
-                         ReplayToolProvider(traces_by_task[trace_id], policy=spec.policy,
-                                            fuzzy_threshold=spec.fuzzy_threshold),
-                         repeat_idx=k)
+            LockstepItem(traces_by_task[trace_id], provider_for(traces_by_task[trace_id]), repeat_idx=k)
             for trace_id in task_ids for k in range(spec.n_per_task)
         ]
         _, lockstep = run_lockstep(items, client, batch_size, max_turns=spec.max_turns,
@@ -106,8 +116,10 @@ def run_eval(
             trace = traces_by_task[trace_id]
             for k in range(spec.n_per_task):
                 # A fresh provider per repeat: replay stats are per-run, and a shared provider would accumulate
-                # counts across repeats and report a divergence rate several times too high.
-                provider = ReplayToolProvider(trace, policy=spec.policy, fuzzy_threshold=spec.fuzzy_threshold)
+                # counts across repeats and report a divergence rate several times too high. In live mode it is
+                # more than bookkeeping -- a shared provider would hand the second repeat a database the first
+                # one had already refunded.
+                provider = provider_for(trace)
                 if hasattr(client, "reset"):
                     client.reset()
                 before = dict(getattr(client, "usage", None) or {})
@@ -119,9 +131,15 @@ def run_eval(
 
     rows = registry.eval_results(run_id)
     metrics, per_cluster = aggregate(rows, traces_by_task)
+    # On every run, not only live ones: a comparison has to be able to tell which question each side answered,
+    # and a run whose mode is missing reads as replay, which is what every run before this field was.
+    metrics["eval_mode"] = spec.tools
     metrics.update(usage_metrics(usage_rows))
     batched = lockstep is not None and lockstep.batched
-    metrics.update(batched_throughput_metrics(rows, lockstep) if batched else throughput_metrics(rows))
+    if lockstep is not None and lockstep.batched:
+        metrics.update(batched_throughput_metrics(rows, lockstep))
+    else:
+        metrics.update(throughput_metrics(rows))
     # Recorded even when throughput itself could not be measured, so the report never has to guess the mode.
     metrics["throughput_mode"] = "batched" if batched else "unbatched"
     if getattr(client, "backend_name", None):
@@ -133,6 +151,30 @@ def run_eval(
         metrics.update(cascade_metrics(rows, getattr(client, "threshold", None)))
     registry.finish_eval_run(run_id, metrics, per_cluster)
     return run_id
+
+
+#: The two tool modes a run can be in. `replay` serves recorded results; `live` runs the project's own tools.
+TOOL_MODES = ("replay", "live")
+
+
+def tool_mode(spec: RunSpec, grader: Grader) -> tuple[Callable[[dict], Any], Grader]:
+    """Resolve `spec.tools` into a provider factory and the grader that goes with it.
+
+    The grader is part of the mode, not an independent choice: a live run graded by replaying its own calls
+    against a fresh database would be reconstructing a state it already has, and would disagree with the real one
+    exactly where the run is interesting -- a call the environment refused, or one the recording never made.
+    """
+    if spec.tools not in TOOL_MODES:
+        raise ValueError(f"tools must be one of {TOOL_MODES}, got {spec.tools!r}")
+    if spec.tools == "live":
+        from agentdistill.eval.live import LiveToolProvider, live_grader, resolve_env_factory
+
+        factory = resolve_env_factory(spec.env_source)
+        return (lambda trace: LiveToolProvider(trace, factory)), live_grader(grader)
+    return (
+        lambda trace: ReplayToolProvider(trace, policy=spec.policy, fuzzy_threshold=spec.fuzzy_threshold),
+        grader,
+    )
 
 
 def lockstep_eligible(client: Any) -> bool:
@@ -225,9 +267,16 @@ def aggregate(rows: list[dict], traces_by_task: dict[str, dict]) -> tuple[dict, 
         by_task.setdefault(r["task_id"], []).append(r)
 
     replay = ReplayStats()
+    live = LiveStats()
+    n_live = 0
     for r in rows:
-        if r.get("replay_stats"):
-            replay.add(r["replay_stats"])
+        stats = r.get("replay_stats")
+        if not stats:
+            continue
+        replay.add(stats)
+        if stats.get("mode") == "live":
+            n_live += 1
+            live.add(stats)
 
     per_cluster: dict[str, dict] = {}
     for task, task_rows in by_task.items():
@@ -258,6 +307,10 @@ def aggregate(rows: list[dict], traces_by_task: dict[str, dict]) -> tuple[dict, 
         "stop_reasons": _counts(r["stop_reason"] for r in rows),
         "replay": replay.to_dict(),
     }
+    if n_live:
+        # Only when something ran live, so a replay run's metrics do not carry a block of zeros that reads like a
+        # live measurement that found nothing.
+        metrics["live"] = {**live.to_dict(), "n_rows": n_live}
     return metrics, per_cluster
 
 
@@ -275,12 +328,42 @@ def _observed_rate(outcomes: dict[str, list[float]], tasks: list[str]) -> float 
     return sum(sum(outcomes[t]) / len(outcomes[t]) for t in tasks) / len(tasks)
 
 
+def eval_mode(run: dict) -> str:
+    """The tool mode a run was made under.
+
+    A run recorded before tool modes existed was necessarily a replay run -- live mode did not exist to produce
+    it -- so a missing field reads as `replay` rather than as unknown.
+    """
+    return str(((run.get("metrics") or {}).get("eval_mode")) or "replay")
+
+
+def mode_mismatch(mode_a: str, mode_b: str) -> dict:
+    """The marker returned in place of statistics when two runs were made under different tool modes.
+
+    Same shape as the insufficient-power marker, and returned under the same key, so every renderer that already
+    knows how to print "not compared" prints this too and none of them can reach for a p-value. `incompatible`
+    distinguishes it from a small sample: more data would not fix this one.
+    """
+    return {
+        "incompatible": True,
+        "code": "eval_mode_mismatch",
+        "eval_mode_a": mode_a,
+        "eval_mode_b": mode_b,
+        "reason": (
+            f"the two runs used different tool modes ({mode_a} and {mode_b}), so they cannot be paired: replay "
+            f"grading counts a valid alternative tool call as a divergence and fails the task, live grading does "
+            f"not, and the difference between the two is not a difference between the subjects"
+        ),
+    }
+
+
 def compare(registry: Any, run_a: str, run_b: str, alpha: float = 0.05) -> dict:
     """Paired comparison of two runs over the same eval set. `a - b`, so positive favours `a`.
 
-    Below the power floor, or on degenerate data, the result carries `insufficient_power` and the raw observed
-    rates instead of statistics. It never raises for lack of data; it does raise for runs that cannot be paired at
-    all (unknown ids, different eval sets), because those are mistakes, not small samples.
+    Below the power floor, on degenerate data, or across tool modes, the result carries the "not compared" marker
+    and the raw observed rates instead of statistics. It never raises for lack of data; it does raise for runs
+    that cannot be paired at all (unknown ids, different eval sets), because those are mistakes, not small
+    samples.
     """
     ra, rb = registry.get_eval_run(run_a), registry.get_eval_run(run_b)
     if ra is None or rb is None:
@@ -295,6 +378,7 @@ def compare(registry: Any, run_a: str, run_b: str, alpha: float = 0.05) -> dict:
     oa, ob = success_by_task(rows_a, "success"), success_by_task(rows_b, "success")
     common = sorted(set(oa) & set(ob))
     n_repeats = min([len(oa[t]) for t in common] + [len(ob[t]) for t in common], default=0)
+    mode_a, mode_b = eval_mode(ra), eval_mode(rb)
     head = {
         "subject_a": ra["subject"],
         "subject_b": rb["subject"],
@@ -305,15 +389,23 @@ def compare(registry: Any, run_a: str, run_b: str, alpha: float = 0.05) -> dict:
         "n_repeats": n_repeats,
         "metrics_a": ra["metrics"],
         "metrics_b": rb["metrics"],
+        "eval_mode_a": mode_a,
+        "eval_mode_b": mode_b,
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "alpha": alpha,
     }
+    observed = {"rate_a": _observed_rate(oa, common), "rate_b": _observed_rate(ob, common)}
 
     def refused(weak: InsufficientPower) -> dict:
         # `observed` is labelled as such and deliberately carries no delta: a difference printed without an
         # interval reads as a finding.
-        return {**head, "insufficient_power": weak.as_dict(),
-                "observed": {"rate_a": _observed_rate(oa, common), "rate_b": _observed_rate(ob, common)}}
+        return {**head, "insufficient_power": weak.as_dict(), "observed": dict(observed)}
+
+    if mode_a != mode_b:
+        # Checked before the power floor: this is not a small sample, it is two different questions, and no
+        # amount of data would make the pairing valid.
+        marker = mode_mismatch(mode_a, mode_b)
+        return {**head, "incompatible": marker, "insufficient_power": marker, "observed": dict(observed)}
 
     weak = power_check(len(common), n_repeats)
     if weak:

@@ -1,0 +1,28 @@
+{
+  "base_model": "Qwen/Qwen2.5-7B-Instruct",
+  "base_model_revision": "a09a35458c702b33eeacc393d103063234e8bc28",
+  "corpus": {
+    "files": {
+      "eval-calib.jsonl": "f91a3cd25df551b2c973e0486f07dfa4d163474ce88036564444c192d8ae9cc8",
+      "eval-holdout.jsonl": "82f6dde076fb421904dad87310ab0111f3883c73ca22bbb3ceb1c583fa7c15dd",
+      "eval-unseen.jsonl": "46d87dc4fa3692cd472edf59f2b6ba337999846cab3865f47870cc5dc2edff19",
+      "traces-train.jsonl": "98169ee43a224d3bb4fabd0d9353a1a6de606a0004eaee8a2a72c6f2a911c383",
+      "traces.jsonl": "82ad9f1e46e5d1f45fbb5133e807adcb85fa540eb787601f610b09114a7f8639"
+    },
+    "hash": "71e68841e231a32f500e761a4baed707b2406244535c20c1aecb85855139bc43"
+  },
+  "eval_sets": {
+    "support-calib-v1": "98b405150497",
+    "support-holdout-v1": "dd2d28fd4354",
+    "support-unseen-v1": "6b9e192feb0a"
+  },
+  "lock_version": 1,
+  "note": "What the GPU day must reproduce. Written by `agentdistill ops lock write`, checked by `agentdistill ops lock check`. Never edited by hand: a hand-edited lock locks nothing.",
+  "sft_dataset": {
+    "content_hash": "dca202f381da5142e5addbf443ca06a4f3408bd273c7da3fb049790c8676e7ea"
+  },
+  "tool_parser": {
+    "family": "hermes",
+    "name": "hermes"
+  }
+}
