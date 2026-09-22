@@ -24,3 +24,6 @@ logs/
 
 # Hugging Face cache pinned by gpu_day.sh (HF_HOME).
 .cache/
+
+# Built site output; the source is site/index.html plus the pipeline report.
+site/_build/

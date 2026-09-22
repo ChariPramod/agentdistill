@@ -3,12 +3,12 @@
 Evidence for each of the nine go criteria in phase 3f, taken at commit `44a8b63` on branch `phase3d`, on
 2026-09-21. Each criterion names the command that proves it and the line of output that does.
 
-**Verdict: NO-GO**, on one criterion only. Criterion 1 needs the repository pushed to the private GitHub repo the
-owner chose; nothing else is outstanding. Every other criterion is green.
+**Verdict: GO**, once the teacher key exists with its spend cap. All nine criteria are green; the only thing
+between here and the box is the key (see "Left for the owner").
 
 | # | Criterion | State |
 |---|---|---|
-| 1 | HEAD committed and pushed; clean rehearsal green from a fresh clone | **RED**: committed, not pushed |
+| 1 | HEAD committed and pushed; clean rehearsal green from a fresh clone | green |
 | 2 | `project.yaml`: teacher, Hub base pinned by SHA, verified parser, pricing seeded | green |
 | 3 | Real dataset rebuilt with the pinned tokenizer; guard passes; lock reproduced by a fresh clone | green |
 | 4 | Live tools for evals and rollouts; mode recorded; `compare` refuses mixed modes | green |
@@ -23,9 +23,8 @@ Full suite: **1365 passed, 5 skipped**. `ruff` and `mypy` clean.
 ## 1. Committed, pushed, and green from a fresh clone
 
 - Committed: `git status --short` is empty; `preflight.sh` → `PASS git.clean: working tree clean at 44a8b63`.
-- **Not pushed.** `preflight.sh` → `FAIL git.pushed: this repository has no remote`. The owner chose a private
-  GitHub repository. Create it empty, then:
-  `git remote add origin <url> && git push -u origin --all && git push --tags`.
+- Pushed: `github.com/ChariPramod/agentdistill` (public, default branch `phase3d`), with the `pre-gpu-day` tag.
+  `preflight.sh` → `PASS git.pushed`.
 - Fresh clone of `44a8b63`, `bash scripts/clean_rehearsal.sh` with no dirty-tree allowance →
   `report ok: subjects ['base', 'student', 'teacher'], 5 warning(s) ['corpus_teacher_differs', 'cost_unbatched',
   'gate_degenerate', 'replay_teacher', 'tiny_mode']` and `clean rehearsal ok`. All five are on the allow list;
@@ -96,12 +95,10 @@ WP2 found no bug. Its change is that a reply now carries the index of the prompt
 
 ## 7. Pre-flight, locally
 
-`bash scripts/preflight.sh` → `preflight: 12 PASS, 2 FAIL, 3 SKIP`. The three SKIPs are the hardware checks,
-which are skipped on a machine with no `nvidia-smi`. The two FAILs are owner actions, not defects:
-
-- `git.pushed`: see criterion 1.
-- `env.api_key`: the key is exported by the owner in the box's shell, by design. It never exists on the laptop,
-  in the repo, or in a prompt.
+`bash scripts/preflight.sh` → `preflight: 13 PASS, 1 FAIL, 3 SKIP`. The three SKIPs are the hardware checks,
+skipped on a machine with no `nvidia-smi`. The single FAIL is `env.api_key`: the key is exported by the owner in
+the box's shell, by design, and never exists on the laptop, in the repo, or in a prompt. On the box, with the key
+exported, the pre-flight is expected to be all PASS.
 
 `tests/test_preflight.py::test_preflight_never_prints_any_part_of_the_key` checks that no 8-character substring of
 a sentinel key ever reaches the output.
@@ -126,9 +123,14 @@ This is an upper bound. Every escalating stage is costed as if every turn escala
 and prompt caching (which can only lower the figure) is not modelled. **Set the teacher workspace's spend limit
 to $147.**
 
+## The public site
+
+`bash scripts/build_site.sh --publish` copies the report the pipeline wrote to the `gh-pages` branch, which
+GitHub serves at <https://charipramod.github.io/agentdistill/>. The site restates no number: it links the report
+and says, at the top, that every figure in it comes from the CPU rehearsal.
+
 ## Left for the owner
 
-1. Push to the private GitHub repo (criterion 1), then `git push --tags` so `pre-gpu-day` reaches it.
-2. Create the Console workspace and key for this project, and set its spend limit to $147.
-3. Rent the box (L40S or A100; Ubuntu 22.04/24.04; CUDA 12.x; 100 GB disk), export the key yourself, and run
+1. Create the Console workspace and key for this project, and set its spend limit to $147.
+2. Rent the box (L40S or A100; Ubuntu 22.04/24.04; CUDA 12.x; 100 GB disk), export the key yourself, and run
    `bash scripts/bootstrap_box.sh`. It ends with the pre-flight. Any FAIL: stop.
