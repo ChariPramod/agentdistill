@@ -1,0 +1,11 @@
+.venv
+tests
+examples
+docs
+artifacts
+logs
+site
+scripts
+*.md
+.git
+.github
