@@ -27,3 +27,5 @@ logs/
 
 # Built site output; the source is site/index.html plus the pipeline report.
 site/_build/
+.vercel
+.env*
