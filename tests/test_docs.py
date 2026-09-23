@@ -51,10 +51,9 @@ def test_every_documented_command_exists(doc):
     if str(doc.relative_to(ROOT)) in PLANNED:
         pytest.skip("a status document, which describes what is not built yet")
 
-    groups, available = cli_surface()
+    _groups, available = cli_surface()
     problems = []
     for parts in documented_invocations(doc.read_text()):
-        head = parts[0]
         # Longest match wins, so a leaf's flags are checked against the leaf's help, not its parent's.
         cmd = next((parts[:n] for n in (3, 2, 1) if " ".join(parts[:n]) in available), parts[:1])
         name = " ".join(cmd)
