@@ -1,0 +1,622 @@
+{
+  "calibration": {
+    "auroc": null,
+    "bins": [],
+    "ece": null,
+    "features": [
+      "mean_logprob",
+      "min_logprob",
+      "p10_logprob",
+      "first_tool_token_entropy",
+      "n_tokens",
+      "n_tool_calls",
+      "has_tool_call",
+      "agreement",
+      "cluster_prior",
+      "turn_idx"
+    ],
+    "holdout": {
+      "auroc": null,
+      "brier": null,
+      "ece": null,
+      "n": 60,
+      "positive_rate": 0.0
+    },
+    "id": "cal_0391e48b72ac4a7a",
+    "note": "",
+    "threshold": 1.0,
+    "verdict": "degenerate_labels",
+    "verdict_reason": "every one of 60 labelled turns is bad; AUROC is undefined"
+  },
+  "cascade": {
+    "escalate_everything": true,
+    "threshold": 1.0,
+    "verified": [
+      {
+        "escalate_everything": true,
+        "escalation_rate": 1.0,
+        "run_id": "ev_f538b7d6baab423d",
+        "success": 1.0,
+        "threshold": 1.0,
+        "wasted_student_tokens": 0.0
+      }
+    ]
+  },
+  "commands": [
+    {
+      "at": "2026-09-22T22:44:32.847754+00:00",
+      "command": "agentdistill train sft ds_4efa6786aa7e3c21 --tag gpu-day --config examples/support_agent/project.tiny.yaml",
+      "id": "tr_b40920c27ac240bd",
+      "kind": "training_run",
+      "provenance": {
+        "command": "agentdistill train sft ds_4efa6786aa7e3c21 --tag gpu-day --config examples/support_agent/project.tiny.yaml",
+        "commit": "4c39b24ae1fe04a536ac90db35f5cc394d81c864",
+        "config_hash": "5a29e310440e",
+        "config_path": "examples/support_agent/project.tiny.yaml",
+        "dirty": false
+      }
+    },
+    {
+      "at": "2026-09-22T22:44:58.510296+00:00",
+      "command": "agentdistill eval run base --eval-set support-holdout-tiny --n 1 --policy strict --backend hf --batch 32 --tag gpu-day --config examples/support_agent/project.tiny.yaml",
+      "id": "ev_9da853280f66417d",
+      "kind": "eval_run",
+      "provenance": {
+        "command": "agentdistill eval run base --eval-set support-holdout-tiny --n 1 --policy strict --backend hf --batch 32 --tag gpu-day --config examples/support_agent/project.tiny.yaml",
+        "commit": "4c39b24ae1fe04a536ac90db35f5cc394d81c864",
+        "config_hash": "5a29e310440e",
+        "config_path": "examples/support_agent/project.tiny.yaml",
+        "dirty": false
+      }
+    },
+    {
+      "at": "2026-09-22T22:45:03.787882+00:00",
+      "command": "agentdistill eval run ad_de205fa900f041f5 --eval-set support-holdout-tiny --n 1 --policy strict --backend hf --batch 32 --tag gpu-day --config examples/support_agent/project.tiny.yaml",
+      "id": "ev_1206fb5dd85f4709",
+      "kind": "eval_run",
+      "provenance": {
+        "command": "agentdistill eval run ad_de205fa900f041f5 --eval-set support-holdout-tiny --n 1 --policy strict --backend hf --batch 32 --tag gpu-day --config examples/support_agent/project.tiny.yaml",
+        "commit": "4c39b24ae1fe04a536ac90db35f5cc394d81c864",
+        "config_hash": "5a29e310440e",
+        "config_path": "examples/support_agent/project.tiny.yaml",
+        "dirty": false
+      }
+    },
+    {
+      "at": "2026-09-22T22:45:06.279801+00:00",
+      "command": "agentdistill eval run teacher --eval-set support-holdout-tiny --n 1 --tools live --tag gpu-day --config examples/support_agent/project.tiny.yaml",
+      "id": "ev_f1148a026e0e4623",
+      "kind": "eval_run",
+      "provenance": {
+        "command": "agentdistill eval run teacher --eval-set support-holdout-tiny --n 1 --tools live --tag gpu-day --config examples/support_agent/project.tiny.yaml",
+        "commit": "4c39b24ae1fe04a536ac90db35f5cc394d81c864",
+        "config_hash": "5a29e310440e",
+        "config_path": "examples/support_agent/project.tiny.yaml",
+        "dirty": false
+      }
+    },
+    {
+      "at": "2026-09-22T22:45:06.596920+00:00",
+      "command": "agentdistill eval run teacher --eval-set support-holdout-tiny --n 1 --tools replay --policy strict --tag gpu-day-replay --config examples/support_agent/project.tiny.yaml",
+      "id": "ev_78d71bd838b244b5",
+      "kind": "eval_run",
+      "provenance": {
+        "command": "agentdistill eval run teacher --eval-set support-holdout-tiny --n 1 --tools replay --policy strict --tag gpu-day-replay --config examples/support_agent/project.tiny.yaml",
+        "commit": "4c39b24ae1fe04a536ac90db35f5cc394d81c864",
+        "config_hash": "5a29e310440e",
+        "config_path": "examples/support_agent/project.tiny.yaml",
+        "dirty": false
+      }
+    },
+    {
+      "at": "2026-09-22T22:47:50.715423+00:00",
+      "command": "agentdistill train onpolicy ad_de205fa900f041f5 --rounds 1 --backend hf --tag gpu-day-r1 --config examples/support_agent/project.tiny.yaml",
+      "id": "tr_c38fa4d353bb42da",
+      "kind": "training_run",
+      "provenance": {
+        "command": "agentdistill train onpolicy ad_de205fa900f041f5 --rounds 1 --backend hf --tag gpu-day-r1 --config examples/support_agent/project.tiny.yaml",
+        "commit": "4c39b24ae1fe04a536ac90db35f5cc394d81c864",
+        "config_hash": "5a29e310440e",
+        "config_path": "examples/support_agent/project.tiny.yaml",
+        "dirty": false
+      }
+    },
+    {
+      "at": "2026-09-22T22:48:22.241369+00:00",
+      "command": "agentdistill train onpolicy ad_de205fa900f041f5 --rounds 1 --backend hf --tag gpu-day-r1 --config examples/support_agent/project.tiny.yaml",
+      "id": "tr_d0761fe7fe174e9f",
+      "kind": "training_run",
+      "provenance": {
+        "command": "agentdistill train onpolicy ad_de205fa900f041f5 --rounds 1 --backend hf --tag gpu-day-r1 --config examples/support_agent/project.tiny.yaml",
+        "commit": "4c39b24ae1fe04a536ac90db35f5cc394d81c864",
+        "config_hash": "5a29e310440e",
+        "config_path": "examples/support_agent/project.tiny.yaml",
+        "dirty": false
+      }
+    },
+    {
+      "at": "2026-09-22T22:48:25.595762+00:00",
+      "command": "agentdistill train onpolicy ad_de205fa900f041f5 --rounds 1 --backend hf --tag gpu-day-r1 --config examples/support_agent/project.tiny.yaml",
+      "id": "ev_9bb1235281124d9f",
+      "kind": "eval_run",
+      "provenance": {
+        "command": "agentdistill train onpolicy ad_de205fa900f041f5 --rounds 1 --backend hf --tag gpu-day-r1 --config examples/support_agent/project.tiny.yaml",
+        "commit": "4c39b24ae1fe04a536ac90db35f5cc394d81c864",
+        "config_hash": "5a29e310440e",
+        "config_path": "examples/support_agent/project.tiny.yaml",
+        "dirty": false
+      }
+    },
+    {
+      "at": "2026-09-22T22:48:34.300497+00:00",
+      "command": "agentdistill eval run ad_c427cce2faf24d3a --eval-set support-holdout-tiny --n 1 --policy strict --backend hf --batch 32 --tag gpu-day-r1 --config examples/support_agent/project.tiny.yaml",
+      "id": "ev_644c3d5e99d8437a",
+      "kind": "eval_run",
+      "provenance": {
+        "command": "agentdistill eval run ad_c427cce2faf24d3a --eval-set support-holdout-tiny --n 1 --policy strict --backend hf --batch 32 --tag gpu-day-r1 --config examples/support_agent/project.tiny.yaml",
+        "commit": "4c39b24ae1fe04a536ac90db35f5cc394d81c864",
+        "config_hash": "5a29e310440e",
+        "config_path": "examples/support_agent/project.tiny.yaml",
+        "dirty": false
+      }
+    },
+    {
+      "at": "2026-09-22T22:48:39.735657+00:00",
+      "command": "agentdistill eval run ad_c427cce2faf24d3a --eval-set support-unseen-tiny --n 1 --policy strict --backend hf --batch 32 --tag gpu-day --config examples/support_agent/project.tiny.yaml",
+      "id": "ev_bf8619da0d4d493f",
+      "kind": "eval_run",
+      "provenance": {
+        "command": "agentdistill eval run ad_c427cce2faf24d3a --eval-set support-unseen-tiny --n 1 --policy strict --backend hf --batch 32 --tag gpu-day --config examples/support_agent/project.tiny.yaml",
+        "commit": "4c39b24ae1fe04a536ac90db35f5cc394d81c864",
+        "config_hash": "5a29e310440e",
+        "config_path": "examples/support_agent/project.tiny.yaml",
+        "dirty": false
+      }
+    },
+    {
+      "at": "2026-09-22T22:48:45.189929+00:00",
+      "command": "agentdistill eval run ad_c427cce2faf24d3a --eval-set support-calib-tiny --n 3 --policy fuzzy --backend hf --logprobs --samples 1 --tag gpu-day-calib --config examples/support_agent/project.tiny.yaml",
+      "id": "ev_84af6449cae14749",
+      "kind": "eval_run",
+      "provenance": {
+        "command": "agentdistill eval run ad_c427cce2faf24d3a --eval-set support-calib-tiny --n 3 --policy fuzzy --backend hf --logprobs --samples 1 --tag gpu-day-calib --config examples/support_agent/project.tiny.yaml",
+        "commit": "4c39b24ae1fe04a536ac90db35f5cc394d81c864",
+        "config_hash": "5a29e310440e",
+        "config_path": "examples/support_agent/project.tiny.yaml",
+        "dirty": false
+      }
+    },
+    {
+      "at": "2026-09-22T22:49:12.345588+00:00",
+      "command": "agentdistill calibrate ad_c427cce2faf24d3a --from-eval ev_84af6449cae14749 --config examples/support_agent/project.tiny.yaml",
+      "id": "cal_0391e48b72ac4a7a",
+      "kind": "calibration",
+      "provenance": {
+        "command": "agentdistill calibrate ad_c427cce2faf24d3a --from-eval ev_84af6449cae14749 --config examples/support_agent/project.tiny.yaml",
+        "commit": "4c39b24ae1fe04a536ac90db35f5cc394d81c864",
+        "config_hash": "5a29e310440e",
+        "config_path": "examples/support_agent/project.tiny.yaml",
+        "dirty": false
+      }
+    },
+    {
+      "at": "2026-09-22T22:49:15.432085+00:00",
+      "command": "agentdistill eval run cascade:ad_c427cce2faf24d3a:auto --eval-set support-holdout-tiny --n 3 --policy fuzzy --backend hf --verify-threshold --tag gpu-day --config examples/support_agent/project.tiny.yaml",
+      "id": "ev_f538b7d6baab423d",
+      "kind": "eval_run",
+      "provenance": {
+        "command": "agentdistill eval run cascade:ad_c427cce2faf24d3a:auto --eval-set support-holdout-tiny --n 3 --policy fuzzy --backend hf --verify-threshold --tag gpu-day --config examples/support_agent/project.tiny.yaml",
+        "commit": "4c39b24ae1fe04a536ac90db35f5cc394d81c864",
+        "config_hash": "5a29e310440e",
+        "config_path": "examples/support_agent/project.tiny.yaml",
+        "dirty": false
+      }
+    },
+    {
+      "at": "2026-09-22T22:49:19.337499+00:00",
+      "command": "agentdistill eval run ad_e40c1d17498c40ca --eval-set support-holdout-tiny --n 3 --policy strict --backend hf --batch 32 --tag gpu-day --config examples/support_agent/project.tiny.yaml",
+      "id": "ev_780cc80c153c4574",
+      "kind": "eval_run",
+      "provenance": {
+        "command": "agentdistill eval run ad_e40c1d17498c40ca --eval-set support-holdout-tiny --n 3 --policy strict --backend hf --batch 32 --tag gpu-day --config examples/support_agent/project.tiny.yaml",
+        "commit": "4c39b24ae1fe04a536ac90db35f5cc394d81c864",
+        "config_hash": "5a29e310440e",
+        "config_path": "examples/support_agent/project.tiny.yaml",
+        "dirty": false
+      }
+    }
+  ],
+  "cost": {
+    "cascade": {
+      "breakeven_tasks_per_day": null,
+      "cost_is_upper_bound": true,
+      "cost_per_task": 0.019907949096439437,
+      "escalation_rate": 1.0,
+      "measured": true,
+      "saving_frac": null,
+      "success": 1.0,
+      "threshold": 1.0
+    },
+    "pricing": {
+      "cache_read_per_mtok": null,
+      "input_per_mtok": 3.0,
+      "model": "replay-stub",
+      "output_per_mtok": 15.0,
+      "provider": "replay",
+      "source": "project.yaml"
+    },
+    "student_cost_per_mtok": 0.5788155305063518,
+    "student_only_cost_per_task": 0.00010794909643943461,
+    "teacher_cost_per_task": 0.0198,
+    "throughput_conditions": "sequential eval harness, one request at a time (unbatched; overstates cost)",
+    "throughput_mode": "unbatched",
+    "throughput_tok_per_s": 959.8145285935085
+  },
+  "eval_set": "support-holdout-tiny",
+  "evaluation_mode": {
+    "eval_set": "support-holdout-tiny",
+    "note": "The gap is the measured distortion of replay grading on this eval set, not a difference between subjects: the same subject ran both ways. Replay counts a valid alternative tool call as a divergence and stops the trajectory there.",
+    "subjects": [
+      {
+        "distortion_pp": 0.0,
+        "live_run": "ev_644c3d5e99d8437a",
+        "live_success": 0.6,
+        "replay_divergence_rate": 0.0,
+        "replay_run": "ev_9bb1235281124d9f",
+        "replay_success": 0.6,
+        "subject": "ad_c427cce2faf24d3a"
+      },
+      {
+        "distortion_pp": 0.0,
+        "live_run": "ev_f1148a026e0e4623",
+        "live_success": 1.0,
+        "replay_divergence_rate": 0.0,
+        "replay_run": "ev_78d71bd838b244b5",
+        "replay_success": 1.0,
+        "subject": "teacher"
+      }
+    ]
+  },
+  "generated_at": "2026-09-22T22:49:37+00:00",
+  "lineage": {
+    "adapter": {
+      "base_model": "/Users/pramodkrishnachari/PRAMOD/PERSONAL/Projects/AgentDistill/examples/support_agent/artifacts/tiny/merged/support-agent-tiny-v2",
+      "id": "ad_c427cce2faf24d3a",
+      "merged": false,
+      "name": "support-agent-tiny-dpo",
+      "quantization": null,
+      "status": "candidate",
+      "tag": "gpu-day-r1",
+      "version": 3
+    },
+    "corpus_teacher": "scripted/rule-based-teacher",
+    "dataset": {
+      "content_hash": "108f546277736806a9171d17bd3ab4b98cb029f55c0cff4ca6104ec58b43f12d",
+      "filter_config": {
+        "source": "on-policy rollouts",
+        "tag": "gpu-day-r1"
+      },
+      "id": "ds_108f546277736806",
+      "n_samples": 15,
+      "name": "support-agent-tiny-pairs",
+      "report_path": null,
+      "version": 1
+    },
+    "events": [],
+    "parents": [
+      {
+        "id": "ad_de205fa900f041f5",
+        "merged": false,
+        "name": "support-agent-tiny",
+        "version": 1
+      }
+    ],
+    "serving_teacher": "replay-stub",
+    "training_run": {
+      "command": "agentdistill train onpolicy ad_de205fa900f041f5 --rounds 1 --backend hf --tag gpu-day-r1 --config examples/support_agent/project.tiny.yaml",
+      "id": "tr_d0761fe7fe174e9f",
+      "method": "dpo",
+      "status": "succeeded"
+    }
+  },
+  "onpolicy": {
+    "candidate_adapter": "ad_c427cce2faf24d3a",
+    "decision": "discard",
+    "eval_run_id": "ev_9bb1235281124d9f",
+    "fuzzy_share": 0.0,
+    "insufficient_power": "the two runs used different tool modes (replay and live), so they cannot be paired: replay grading counts a valid alternative tool call as a divergence and fails the task, live grading does not, and the difference between the two is not a difference between the subjects",
+    "n_rollouts": 952,
+    "pair_stats": {
+      "cap_per_task": 3,
+      "diff_kind": {
+        "tool_vs_text": 15
+      },
+      "max_per_task": 1,
+      "n_pairs": 15,
+      "n_rollout": 0,
+      "n_teacher": 15,
+      "per_task_histogram": {
+        "1": 15
+      },
+      "warnings": []
+    },
+    "reason": "the two runs used different tool modes (replay and live), so they cannot be paired: replay grading counts a valid alternative tool call as a divergence and fails the task, live grading does not, and the difference between the two is not a difference between the subjects",
+    "round_id": "rd_0b1a08463ac2473c",
+    "round_idx": 0,
+    "start_adapter": "ad_de205fa900f041f5",
+    "tag": "gpu-day-r1",
+    "tools_mode": "live"
+  },
+  "paired": {
+    "student_vs_base": {
+      "alpha": 0.05,
+      "eval_mode_a": "live",
+      "eval_mode_b": "live",
+      "eval_set_id": "es_support-holdout-tiny",
+      "generated_at": "2026-09-22T22:49:37+00:00",
+      "insufficient_power": {
+        "degenerate": null,
+        "insufficient_power": true,
+        "min_repeats": 3,
+        "min_tasks": 20,
+        "n_repeats": 1,
+        "n_tasks": 10,
+        "reason": "not enough data for a comparison: 10 tasks (need at least 20), 1 repeats per task (need at least 3)"
+      },
+      "metrics_a": {
+        "divergence_rate": 0.0,
+        "eval_mode": "live",
+        "latency_ms_median": 190.0,
+        "live": {
+          "by_tool": {},
+          "calls": 0,
+          "mode": "live",
+          "n_rows": 10,
+          "tool_error_rate": 0.0,
+          "tool_errors": 0
+        },
+        "n_per_task": 1,
+        "n_rows": 10,
+        "n_tasks": 10,
+        "replay": {
+          "diverged": 0,
+          "fuzzy": 0,
+          "fuzzy_share": 0.0,
+          "min_fuzzy_score": null,
+          "replayed": 0
+        },
+        "schema_valid": 1.0,
+        "stop_reasons": {
+          "answered": 10
+        },
+        "success": 0.6,
+        "throughput_conditions": "sequential eval harness, one request at a time (unbatched; overstates cost)",
+        "throughput_mode": "unbatched",
+        "throughput_tok_per_s": 959.8145285935085,
+        "tokens_est_median": 186.5,
+        "tool_calls_median": 0.0,
+        "turns_median": 1.0
+      },
+      "metrics_b": {
+        "divergence_rate": 0.0,
+        "eval_mode": "live",
+        "latency_ms_median": 122.0,
+        "live": {
+          "by_tool": {},
+          "calls": 0,
+          "mode": "live",
+          "n_rows": 10,
+          "tool_error_rate": 0.0,
+          "tool_errors": 0
+        },
+        "n_per_task": 1,
+        "n_rows": 10,
+        "n_tasks": 10,
+        "replay": {
+          "diverged": 0,
+          "fuzzy": 0,
+          "fuzzy_share": 0.0,
+          "min_fuzzy_score": null,
+          "replayed": 0
+        },
+        "schema_valid": 1.0,
+        "stop_reasons": {
+          "answered": 10
+        },
+        "success": 0.6,
+        "throughput_conditions": "sequential eval harness, one request at a time (unbatched; overstates cost)",
+        "throughput_mode": "unbatched",
+        "throughput_tok_per_s": 1572.1352019785654,
+        "tokens_est_median": 189.0,
+        "tool_calls_median": 0.0,
+        "turns_median": 1.0
+      },
+      "n_repeats": 1,
+      "n_shared_tasks": 10,
+      "observed": {
+        "rate_a": 0.6,
+        "rate_b": 0.6
+      },
+      "run_a": "ev_644c3d5e99d8437a",
+      "run_b": "ev_9da853280f66417d",
+      "subject_a": "ad_c427cce2faf24d3a",
+      "subject_b": "base"
+    },
+    "student_vs_teacher": {
+      "alpha": 0.05,
+      "eval_mode_a": "live",
+      "eval_mode_b": "live",
+      "eval_set_id": "es_support-holdout-tiny",
+      "generated_at": "2026-09-22T22:49:37+00:00",
+      "insufficient_power": {
+        "degenerate": null,
+        "insufficient_power": true,
+        "min_repeats": 3,
+        "min_tasks": 20,
+        "n_repeats": 1,
+        "n_tasks": 10,
+        "reason": "not enough data for a comparison: 10 tasks (need at least 20), 1 repeats per task (need at least 3)"
+      },
+      "metrics_a": {
+        "divergence_rate": 0.0,
+        "eval_mode": "live",
+        "latency_ms_median": 190.0,
+        "live": {
+          "by_tool": {},
+          "calls": 0,
+          "mode": "live",
+          "n_rows": 10,
+          "tool_error_rate": 0.0,
+          "tool_errors": 0
+        },
+        "n_per_task": 1,
+        "n_rows": 10,
+        "n_tasks": 10,
+        "replay": {
+          "diverged": 0,
+          "fuzzy": 0,
+          "fuzzy_share": 0.0,
+          "min_fuzzy_score": null,
+          "replayed": 0
+        },
+        "schema_valid": 1.0,
+        "stop_reasons": {
+          "answered": 10
+        },
+        "success": 0.6,
+        "throughput_conditions": "sequential eval harness, one request at a time (unbatched; overstates cost)",
+        "throughput_mode": "unbatched",
+        "throughput_tok_per_s": 959.8145285935085,
+        "tokens_est_median": 186.5,
+        "tool_calls_median": 0.0,
+        "turns_median": 1.0
+      },
+      "metrics_b": {
+        "completion_tokens_median": 360.0,
+        "divergence_rate": 0.0,
+        "eval_mode": "live",
+        "latency_ms_median": 0.0,
+        "live": {
+          "by_tool": {
+            "create_ticket": 1,
+            "get_customer": 8,
+            "get_order": 3,
+            "issue_refund": 2,
+            "list_orders": 8
+          },
+          "calls": 22,
+          "mode": "live",
+          "n_rows": 10,
+          "tool_error_rate": 0.0,
+          "tool_errors": 0
+        },
+        "n_per_task": 1,
+        "n_rows": 10,
+        "n_tasks": 10,
+        "prompt_tokens_median": 4800.0,
+        "replay": {
+          "diverged": 0,
+          "fuzzy": 0,
+          "fuzzy_share": 0.0,
+          "min_fuzzy_score": null,
+          "replayed": 0
+        },
+        "schema_valid": 1.0,
+        "stop_reasons": {
+          "answered": 10
+        },
+        "success": 1.0,
+        "teacher_backend": "replay",
+        "throughput_conditions": "sequential eval harness, one request at a time (unbatched; overstates cost)",
+        "throughput_mode": "unbatched",
+        "throughput_tok_per_s": 518000.0,
+        "tokens_est_median": 120.5,
+        "tool_calls_median": 3.0,
+        "turns_median": 4.0
+      },
+      "n_repeats": 1,
+      "n_shared_tasks": 10,
+      "observed": {
+        "rate_a": 0.6,
+        "rate_b": 1.0
+      },
+      "run_a": "ev_644c3d5e99d8437a",
+      "run_b": "ev_f1148a026e0e4623",
+      "subject_a": "ad_c427cce2faf24d3a",
+      "subject_b": "teacher"
+    }
+  },
+  "per_cluster": [
+    {
+      "base": 0.6,
+      "cluster": "none",
+      "n_tasks": 10,
+      "routing": "student",
+      "student": 0.6,
+      "teacher": 1.0
+    }
+  ],
+  "project": "support-agent-tiny",
+  "quantization": {
+    "adapter_id": "ad_e40c1d17498c40ca",
+    "bf16_success": 0.6,
+    "delta_pp": 0.0,
+    "method": "fp8",
+    "quantized_success": 0.6,
+    "run_id": "ev_780cc80c153c4574"
+  },
+  "subjects": {
+    "base": {
+      "command": "agentdistill eval run base --eval-set support-holdout-tiny --n 1 --policy strict --backend hf --batch 32 --tag gpu-day --config examples/support_agent/project.tiny.yaml",
+      "divergence_rate": 0.0,
+      "n_per_task": 1,
+      "n_tasks": 10,
+      "run_id": "ev_9da853280f66417d",
+      "schema_valid": 1.0,
+      "subject": "base",
+      "success": 0.6,
+      "tokens_median": 189.0,
+      "turns_median": 1.0
+    },
+    "student": {
+      "command": "agentdistill eval run ad_c427cce2faf24d3a --eval-set support-holdout-tiny --n 1 --policy strict --backend hf --batch 32 --tag gpu-day-r1 --config examples/support_agent/project.tiny.yaml",
+      "divergence_rate": 0.0,
+      "n_per_task": 1,
+      "n_tasks": 10,
+      "run_id": "ev_644c3d5e99d8437a",
+      "schema_valid": 1.0,
+      "subject": "ad_c427cce2faf24d3a",
+      "success": 0.6,
+      "tokens_median": 186.5,
+      "turns_median": 1.0
+    },
+    "teacher": {
+      "command": "agentdistill eval run teacher --eval-set support-holdout-tiny --n 1 --tools live --tag gpu-day --config examples/support_agent/project.tiny.yaml",
+      "divergence_rate": 0.0,
+      "n_per_task": 1,
+      "n_tasks": 10,
+      "run_id": "ev_f1148a026e0e4623",
+      "schema_valid": 1.0,
+      "subject": "teacher",
+      "success": 1.0,
+      "tokens_median": 120.5,
+      "turns_median": 4.0
+    }
+  },
+  "tiny": true,
+  "unseen_set": null,
+  "warning_codes": [
+    "tiny_mode",
+    "gate_degenerate",
+    "corpus_teacher_differs",
+    "replay_teacher",
+    "cost_unbatched"
+  ],
+  "warnings": [
+    "TINY MODE: this run used the CPU rehearsal config. Every number here is a smoke test of the pipeline, not a measurement of anything.",
+    "the confidence gate was fitted on degenerate labels (every one of 60 labelled turns is bad; AUROC is undefined), so AUROC is undefined; the gateway refuses it and escalates every turn",
+    "the training corpus was written by `scripted/rule-based-teacher` and the teacher being compared against and priced is `replay-stub`. The student imitates the corpus teacher, so this comparison is operational -- can this student replace that teacher -- and not a measurement of distillation from it.",
+    "teacher metrics come from a replay stub (tiny mode); cost figures are structural, not measured",
+    "student throughput was measured unbatched (one request at a time), so its cost per token is an upper bound from sequential measurement and the cascade is not priced against the teacher. Rerun the student eval with a batch size to measure a serving figure."
+  ]
+}
