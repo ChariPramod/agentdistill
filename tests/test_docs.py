@@ -26,7 +26,15 @@ def cli_surface() -> tuple[dict[str, set[str]], set[str]]:
 
     root = get_command(app)
     groups = {n: set(getattr(c, "commands", {})) for n, c in root.commands.items()}  # type: ignore[attr-defined]
-    return groups, set(groups) | {f"{g} {s}" for g, subs in groups.items() for s in subs}
+    names = set(groups) | {f"{g} {s}" for g, subs in groups.items() for s in subs}
+    # Three levels deep, for groups inside groups (`ops lock check`). Without this the checker resolves
+    # `ops lock check --config` to `ops lock`, whose help lists subcommands rather than the flag, and reports a
+    # flag that does exist as missing.
+    for g, subs in groups.items():
+        for sub in subs:
+            child = getattr(root.commands[g], "commands", {}).get(sub)  # type: ignore[attr-defined]
+            names |= {f"{g} {sub} {leaf}" for leaf in getattr(child, "commands", {})}
+    return groups, names
 
 
 def documented_invocations(text: str) -> list[list[str]]:
@@ -47,7 +55,8 @@ def test_every_documented_command_exists(doc):
     problems = []
     for parts in documented_invocations(doc.read_text()):
         head = parts[0]
-        cmd = parts[:2] if head in groups and len(parts) > 1 and parts[1] in groups[head] else parts[:1]
+        # Longest match wins, so a leaf's flags are checked against the leaf's help, not its parent's.
+        cmd = next((parts[:n] for n in (3, 2, 1) if " ".join(parts[:n]) in available), parts[:1])
         name = " ".join(cmd)
         if name not in available:
             problems.append(f"no such command `{name}`")
